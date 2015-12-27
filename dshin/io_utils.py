@@ -26,9 +26,9 @@ def read_off(filename):
     vertices = np.fromstring(' '.join(lines[2:num_vertices + 2]),
                              dtype=np.float64, sep=' ').reshape((-1, 3))
     faces = np.fromstring(
-        ' '.join(lines[num_vertices + 2:num_vertices + num_faces + 2]),
-        dtype=np.uint32,
-        sep=' ').reshape((-1, 4))
+            ' '.join(lines[num_vertices + 2:num_vertices + num_faces + 2]),
+            dtype=np.uint32,
+            sep=' ').reshape((-1, 4))
 
     assert len(lines) == num_vertices + num_faces + 2
     assert (faces[:, 0] == 3).all(), "all triangle faces"
