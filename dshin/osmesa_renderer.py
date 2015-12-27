@@ -99,10 +99,15 @@ def render_depth(vertices, P, out_wh=(512, 512), lrtb=(0, 511, 0, 511),
 
 
 def render_silhouette(vertices, P, out_wh=(512, 512), lrtb=(0, 511, 0, 511),
-                      is_perspective=True, is_viewing_negative_z=False,
-                      near=None,
-                      far=None):
-    pass
+                      is_perspective=True, flip_z=True, near=None, far=None):
+    """
+    See render_depth.
+    """
+    zbuffer = render_depth(vertices, P=P, out_wh=out_wh, lrtb=lrtb,
+                           is_perspective=is_perspective, flip_z=flip_z,
+                           near=near, far=None, raw_zbuffer=True)
+    silhouette = zbuffer != ((1 << 32) - 1)
+    return silhouette
 
 
 def ortho34(left, right, bottom, top, znear, zfar):
