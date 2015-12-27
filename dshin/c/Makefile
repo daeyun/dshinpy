@@ -1,12 +1,13 @@
 CC=gcc
-CFLAGS=-O2 -fPIC
+#CFLAGS=-O2 -fPIC -Wall
+CFLAGS=-Ofast -march=native -fPIC -Wall
 TARGET=render_depth.so
 LIBS=-lOSMesa
 
 default: $(TARGET)
 
-$(TARGET): render_depth.c
-	$(CC) $(CFLAGS) -shared -o $(TARGET) render_depth.c $(LIBS)
+%.so: %.c
+	$(CC) $(CFLAGS) -shared $< -o $@ $(LIBS)
 
 clean:
 	rm -f $(TARGET) *.pyc
