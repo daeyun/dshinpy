@@ -5,8 +5,14 @@ from os import path
 import numpy as np
 from numpy.ctypeslib import ndpointer
 
+from sys import platform as _platform
+if _platform == "darwin":
+    libname = 'render_depth.darwin.so'
+else:
+    libname = 'render_depth.linux.so'
+
 file_dir = path.dirname(path.realpath(__file__))
-libpath = path.join(file_dir, 'c', 'render_depth.so')
+libpath = path.join(file_dir, 'c', libname)
 lib = cdll.LoadLibrary(libpath)
 
 lib.render_depth.restype = ctypes.c_int

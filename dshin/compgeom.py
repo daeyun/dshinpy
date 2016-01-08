@@ -1,5 +1,5 @@
 import numpy as np
-import scipy.linalg as la
+import numpy.linalg as nla
 
 
 def ray_triangle_intersection(faces, vertices, ray):
@@ -16,7 +16,7 @@ def ray_triangle_intersection(faces, vertices, ray):
     n = np.cross(u, v, axis=1)
 
     # check if degenerate
-    is_valid &= (la.norm(n, 2, axis=1) > 1e-16)
+    is_valid &= (nla.norm(n, 2, axis=1) > 1e-16)
 
     vdir = ray[1, :] - ray[0, :]
     w0 = ray[0, :] - triangles[:, 0, :]
