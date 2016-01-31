@@ -1,5 +1,6 @@
 from os import path
-import glog as log
+import sys
+import os
 import numpy as np
 
 
@@ -12,6 +13,8 @@ def read_mesh(filename):
     """
     if filename.endswith('.off'):
         return read_off(filename)
+    if filename.endswith('.ply'):
+        return read_ply(filename)
 
 
 def read_off(filename):
@@ -36,13 +39,40 @@ def read_off(filename):
     faces = faces[:, 1:]
 
     if faces.min() != 0:
-        log.warn('faces.min() != 0')
+        print('faces.min() != 0', file=sys.stderr)
 
     if faces.max() != vertices.shape[0] - 1:
-        log.warn('faces.max() != vertices.shape[0]-1')
+        print('faces.max() != vertices.shape[0]-1', file=sys.stderr)
         assert faces.max() < vertices.shape[0]
 
     return {
         'v': vertices,
         'f': faces,
     }
+
+
+def read_ply(filename):
+    from plyfile import PlyData
+    plydata = PlyData.read(filename)
+    v = np.vstack((plydata['vertex']['x'], plydata['vertex']['y'],
+                   plydata['vertex']['z'])).T
+    inds = plydata['face']['vertex_indices']
+    f = np.vstack(([i for i in inds]))
+    return {
+        'v': v,
+        'f': f,
+    }
+
+
+def save_off(mesh, filename):
+    verts = mesh['v'].astype(np.float32)
+    faces = mesh['f'].astype(np.int32)
+    if not path.isdir(path.dirname(filename)):
+        os.makedirs(path.dirname(filename))
+
+    with open(path.expanduser(filename), 'ab') as fp:
+        fp.write('OFF\n{} {} 0\n'.format(
+                verts.shape[0], faces.shape[0]).encode('utf-8'))
+        np.savetxt(fp, verts, fmt='%.5f')
+        np.savetxt(fp, np.hstack((3 * np.ones((
+            faces.shape[0], 1)), faces)), fmt='%d')

@@ -173,6 +173,7 @@ def lookat_matrix(cam_xyz, obj_xyz, up=(0, 0, 1)):
 
     R = np.vstack((s, u, -f))
 
+
     M = np.hstack([R, np.zeros((3, 1))])
     T = np.eye(4)
     T[:3, 3] = -cam_xyz
@@ -226,21 +227,21 @@ def normalize_mesh_vertices(mesh, up='+z'):
     b = la.norm(pts[:, 1, :] - pts[:, 2, :], 2, axis=1)
     c = la.norm(pts[:, 2, :] - pts[:, 0, :], 2, axis=1)
     s = (a + b + c) / 2.0
-    areas = np.sqrt(s * (s - a) * (s - b) * (s - c))
+    areas_sq = s * (s - a) * (s - b) * (s - c)
+    areas_sq = np.abs(areas_sq)
+    areas = np.sqrt(areas_sq)
     areas = np.tile(areas, 3)
-
     pts = mesh['v'][mesh['f'].ravel()]
-
     weighted_std = stats.weighted_std(areas, pts)
-    weighted_mean = stats.weighted_mean(areas, pts)
+    # weighted_mean = stats.weighted_mean(areas, pts)
 
-    t = -weighted_mean
+    t = -(mesh['v'].max(0)+mesh['v'].min(0))/2
 
     furthest = la.norm(pts, ord=2, axis=1).max()
-    sigma = 2.5 * weighted_std
+    sigma = 2 * weighted_std
 
-    # min(distance to the furthest point, 2.5 standard deviation) should have length 1.
-    scale = 1.0 / min(furthest, sigma)
+    # 2 standard deviation should have length 1.
+    scale = 1.0 / sigma
 
     M = np.array([
         [1, 0, 0, t[0]],

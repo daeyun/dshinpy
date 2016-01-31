@@ -12,7 +12,7 @@ from mpl_toolkits.mplot3d import proj3d
 # from mpl_toolkits import mplot3d
 
 
-def edge_3d(lines, ax=None, colors=None):
+def edge_3d(lines, ax=None, colors=None, lim=None):
     lines = np.array(lines, dtype=np.float)
     lc = art3d.Line3DCollection(lines, linewidths=2, colors=colors)
     if ax is None:
@@ -20,12 +20,16 @@ def edge_3d(lines, ax=None, colors=None):
         ax = fig.add_subplot(111, projection='3d')
     ax.add_collection3d(lc)
 
-    bmax = (lines.max(axis=0).max(axis=0))
-    bmin = (lines.min(axis=0).min(axis=0))
-    padding = np.abs((bmax - bmin) / 2.0).max()
+    if lim is None:
+        bmax = (lines.max(axis=0).max(axis=0))
+        bmin = (lines.min(axis=0).min(axis=0))
+        padding = np.abs((bmax - bmin) / 2.0).max()
 
-    bmin = (bmax + bmin) / 2.0 - padding
-    bmax = (bmax + bmin) / 2.0 + padding
+        bmin = (bmax + bmin) / 2.0 - padding
+        bmax = (bmax + bmin) / 2.0 + padding
+    else:
+        bmin = lim.ravel()[:3]
+        bmax = lim.ravel()[3, :6]
 
     ax.set_xlim([bmin[0], bmax[0]])
     ax.set_ylim([bmin[1], bmax[1]])
@@ -35,7 +39,7 @@ def edge_3d(lines, ax=None, colors=None):
     return ax
 
 
-def pts(pts, ax=None, color='blue', markersize=5):
+def pts(pts, ax=None, color='blue', markersize=5, lim=None):
     if ax is None:
         fig = pt.figure()
         # ax = fig.add_subplot(111, projection='3d')
@@ -45,12 +49,37 @@ def pts(pts, ax=None, color='blue', markersize=5):
         ax.set_zlabel('Z')
         ax.set_aspect('equal')
 
-    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker='.', linewidth=0, c=color, s=markersize)
+    if type(lim) == list:
+        lim = np.array(lim)
+
+    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker='.', linewidth=0,
+               c=color, s=markersize)
+
+    if lim is None:
+        bmax = (pts.max(axis=0).max(axis=0))
+        bmin = (pts.min(axis=0).min(axis=0))
+
+        padding = np.abs((bmax - bmin) / 2.0).max()
+        bmin = (bmax + bmin) / 2.0 - padding
+        bmax = (bmax + bmin) / 2.0 + padding
+    else:
+        bmin = lim.ravel()[:3]
+        bmax = lim.ravel()[3:6]
+
+    # ax.scatter(bmin[0], bmin[1], bmin[2], marker='.', linewidth=0, c='white', s=0)
+    # ax.scatter(bmax[0], bmax[1], bmax[2], marker='.', linewidth=0, c='white', s=0)
+    # print('####', bmin, bmax)
+
+    ax.set_xlim([bmin, bmax])
+    ax.set_ylim([bmin, bmax])
+    ax.set_zlim([bmin, bmax])
+    ax.set_aspect('equal')
 
     return ax
 
 
-def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1, linewidth=1):
+def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1,
+           linewidth=1):
     if ax is None:
         fig = pt.figure()
         ax = fig.gca(projection='3d')
@@ -73,7 +102,8 @@ def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1, linewi
     ax.plot_wireframe(x, y, z, color=color, linewidth=linewidth, alpha=alpha)
 
 
-def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1, linewidth=1):
+def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
+         linewidth=1):
     if ax is None:
         fig = pt.figure()
         ax = fig.gca(projection='3d')
@@ -81,7 +111,8 @@ def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1, linewid
     ax.set_aspect('equal')
 
     r = [-radius, radius]
-    pts = np.array([[s, e] for s, e in itertools.combinations(np.array(list(itertools.product(r, r, r))), 2) if
+    pts = np.array([[s, e] for s, e in itertools.combinations(
+        np.array(list(itertools.product(r, r, r))), 2) if
                     np.sum(np.abs(s - e)) == r[1] - r[0]])
     pts += center_xyz
 
@@ -101,8 +132,10 @@ class Arrow3D(FancyArrowPatch):
         FancyArrowPatch.draw(self, renderer)
 
 
-def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10, text=None):
-    a = Arrow3D(xs, ys, zs, mutation_scale=tip_size, lw=linewidth, arrowstyle="-|>", color=color)
+def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
+                   text=None):
+    a = Arrow3D(xs, ys, zs, mutation_scale=tip_size, lw=linewidth,
+                arrowstyle="-|>", color=color)
     ax.add_artist(a)
 
     if text is not None:
@@ -118,7 +151,8 @@ def draw_arrow_3d(start_pts, end_pts, ax, colors='red', texts=None):
     ys = np.hstack((start_pts[:, 1, None], end_pts[:, 1, None]))
     zs = np.hstack((start_pts[:, 2, None], end_pts[:, 2, None]))
     for i in range(xs.shape[0]):
-        color = colors[i] if isinstance(colors, list) or isinstance(colors, np.ndarray) else colors
+        color = colors[i] if isinstance(colors, list) or isinstance(colors,
+                                                                    np.ndarray) else colors
         text = texts[i] if isinstance(texts, list) else None
         draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text)
 
@@ -134,14 +168,17 @@ def draw_camera(Rt, ax, scale=10):
     arrow_start = np.tile(cam_xyz, [3, 1])
     arrow_end = scale * R + cam_xyz
 
-    draw_arrow_3d(arrow_start, arrow_end, ax, colors=['red', 'blue', 'green'], texts=['x', 'y', 'z'])
+    draw_arrow_3d(arrow_start, arrow_end, ax, colors=['red', 'blue', 'green'],
+                  texts=['x', 'y', 'z'])
 
     pts(cam_xyz[None, :], ax=ax, markersize=0)
     pts(arrow_end, ax=ax, markersize=0)
 
     pt.draw()
 
+
 def draw_cameras(cameras, ax):
     from dshin import geom3d
     for camera in cameras:
-        geom3d.draw_camera(np.hstack((camera.s*camera.R, camera.t)), ax=ax, scale=0.1)
+        geom3d.draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax,
+                           scale=0.1)

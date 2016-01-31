@@ -2,8 +2,8 @@ CC=gcc
 CFLAGS=-O3 -fPIC -Wall
 #CFLAGS=-Ofast -march=native -fPIC -Wall
 
-INCLUDE_PATHS=-I/usr/local/include
-LIB_PATHS=-L/usr/local/lib
+INCLUDE_PATHS=-I/usr/local/mesa/include
+LIB_PATHS=-L/usr/local/mesa/lib
 
 UNAME := $(shell uname)
 ifeq ($(UNAME), Linux)

@@ -51,3 +51,27 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y'):
     cb = pt.colorbar(ii, cax=cax)
     if clim is not None:
         cb.set_clim(clim)
+
+
+def montage(images, gridwidth=None, empty_value=0):
+    if type(images) is not list:
+        images = [images[i] for i in range(images.shape[0])]
+    imtype = images[0].dtype
+
+    if gridwidth is None:
+        gridwidth = int(np.ceil(np.sqrt(len(images))))
+    gridheight = int(np.ceil(len(images) / gridwidth))
+    remaining = gridwidth * gridheight
+    rows = []
+    while remaining > 0:
+        rowimgs = images[:gridwidth]
+        images = images[gridwidth:]
+        nblank = gridwidth - len(rowimgs)
+        empty_block = np.zeros(rowimgs[0].shape)
+        empty_block[:] = empty_value
+        rowimgs.extend([empty_block] * nblank)
+        remaining -= gridwidth
+        row = np.hstack(rowimgs)
+        rows.append(row)
+    m = np.vstack(rows)
+    return m.astype(imtype)
