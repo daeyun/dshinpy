@@ -21,19 +21,21 @@ def read_off(filename):
     filename = path.expanduser(filename)
     with open(filename) as f:
         content = f.read()
+
+    assert content[:3].upper() == 'OFF'
+    content = content[4:] if content[3] == '\n' else content[3:]
     lines = content.splitlines()
 
-    assert lines[0].upper() == 'OFF'
-    num_vertices, num_faces, _ = [int(val) for val in lines[1].split()]
+    num_vertices, num_faces, _ = [int(val) for val in lines[0].split()]
 
-    vertices = np.fromstring(' '.join(lines[2:num_vertices + 2]),
+    vertices = np.fromstring(' '.join(lines[1:num_vertices + 1]),
                              dtype=np.float64, sep=' ').reshape((-1, 3))
     faces = np.fromstring(
-            ' '.join(lines[num_vertices + 2:num_vertices + num_faces + 2]),
+            ' '.join(lines[num_vertices + 1:num_vertices + num_faces + 1]),
             dtype=np.uint32,
             sep=' ').reshape((-1, 4))
 
-    assert len(lines) == num_vertices + num_faces + 2
+    assert len(lines) == num_vertices + num_faces + 1
     assert (faces[:, 0] == 3).all(), "all triangle faces"
 
     faces = faces[:, 1:]
@@ -44,6 +46,9 @@ def read_off(filename):
     if faces.max() != vertices.shape[0] - 1:
         print('faces.max() != vertices.shape[0]-1', file=sys.stderr)
         assert faces.max() < vertices.shape[0]
+
+    assert vertices.shape[0] == num_vertices
+    assert faces.shape[0] == num_faces
 
     return {
         'v': vertices,

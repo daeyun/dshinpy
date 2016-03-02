@@ -45,12 +45,14 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y'):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
 
+    cax = divider.append_axes("right", size="5%", pad=0.05)
     # cb = ax.figure.colorbar(ii)
     cb = pt.colorbar(ii, cax=cax)
     if clim is not None:
+        # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
+
 
 
 def montage(images, gridwidth=None, empty_value=0):

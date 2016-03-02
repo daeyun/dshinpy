@@ -221,27 +221,26 @@ def apply44(M, pts):
 
 
 def normalize_mesh_vertices(mesh, up='+z'):
-    pts = mesh['v'][mesh['f']]
+    # pts = mesh['v'][mesh['f']]
+    # a = la.norm(pts[:, 0, :] - pts[:, 1, :], 2, axis=1)
+    # b = la.norm(pts[:, 1, :] - pts[:, 2, :], 2, axis=1)
+    # c = la.norm(pts[:, 2, :] - pts[:, 0, :], 2, axis=1)
+    # s = (a + b + c) / 2.0
+    # areas_sq = s * (s - a) * (s - b) * (s - c)
+    # areas_sq = np.abs(areas_sq)
+    # areas = np.sqrt(areas_sq)
+    # areas = np.tile(areas, 3)
 
-    a = la.norm(pts[:, 0, :] - pts[:, 1, :], 2, axis=1)
-    b = la.norm(pts[:, 1, :] - pts[:, 2, :], 2, axis=1)
-    c = la.norm(pts[:, 2, :] - pts[:, 0, :], 2, axis=1)
-    s = (a + b + c) / 2.0
-    areas_sq = s * (s - a) * (s - b) * (s - c)
-    areas_sq = np.abs(areas_sq)
-    areas = np.sqrt(areas_sq)
-    areas = np.tile(areas, 3)
     pts = mesh['v'][mesh['f'].ravel()]
-    weighted_std = stats.weighted_std(areas, pts)
+    # weighted_std = stats.weighted_std(areas, pts)
     # weighted_mean = stats.weighted_mean(areas, pts)
 
     t = -(mesh['v'].max(0)+mesh['v'].min(0))/2
 
-    furthest = la.norm(pts, ord=2, axis=1).max()
-    sigma = 2 * weighted_std
+    furthest = la.norm(pts+t, ord=2, axis=1).max()
+    # sigma = 2 * weighted_std
 
-    # 2 standard deviation should have length 1.
-    scale = 1.0 / sigma
+    scale = 1.0 / furthest
 
     M = np.array([
         [1, 0, 0, t[0]],

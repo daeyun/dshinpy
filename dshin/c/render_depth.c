@@ -65,6 +65,10 @@ int render_depth(const double *vertices, const size_t num_points, const int w,
         out_width, out_height);
 
   memcpy(out, depth_buffer, out_height * out_width * sizeof(uint32_t));
+  int ii = 0;
+  for(ii=0;ii<out_height * out_width;ii++) {
+      printf("%d\n", depth_buffer[ii]);
+  }
 
   OSMesaDestroyContext(context);
   free(buffer);
