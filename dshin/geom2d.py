@@ -49,6 +49,7 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y'):
     cax = divider.append_axes("right", size="5%", pad=0.05)
     # cb = ax.figure.colorbar(ii)
     cb = pt.colorbar(ii, cax=cax)
+    cb.ax.tick_params(labelsize=4)
     if clim is not None:
         # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
