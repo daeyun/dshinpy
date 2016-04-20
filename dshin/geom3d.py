@@ -4,17 +4,19 @@ from mpl_toolkits.mplot3d import art3d
 import scipy.linalg as la
 
 import itertools
+import math
 
 from matplotlib.patches import FancyArrowPatch
 from mpl_toolkits.mplot3d import proj3d
+from dshin import transforms
 
 
 # from mpl_toolkits import mplot3d
 
 
-def edge_3d(lines, ax=None, colors=None, lim=None):
+def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
     lines = np.array(lines, dtype=np.float)
-    lc = art3d.Line3DCollection(lines, linewidths=2, colors=colors)
+    lc = art3d.Line3DCollection(lines, linewidths=linewidths, colors=colors)
     if ax is None:
         fig = pt.figure()
         ax = fig.add_subplot(111, projection='3d')
@@ -27,6 +29,7 @@ def edge_3d(lines, ax=None, colors=None, lim=None):
 
         bmin = (bmax + bmin) / 2.0 - padding
         bmax = (bmax + bmin) / 2.0 + padding
+
     else:
         bmin = lim.ravel()[:3]
         bmax = lim.ravel()[3, :6]
@@ -39,7 +42,7 @@ def edge_3d(lines, ax=None, colors=None, lim=None):
     return ax
 
 
-def pts(pts, ax=None, color='blue', markersize=5, lim=None):
+def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None):
     if ax is None:
         fig = pt.figure()
         # ax = fig.add_subplot(111, projection='3d')
@@ -48,6 +51,8 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None):
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
         ax.set_aspect('equal')
+    if cam_sph is not None:
+        ax.view_init(elev=90-cam_sph[1], azim=cam_sph[2])
 
     if type(lim) == list:
         lim = np.array(lim)
@@ -70,9 +75,10 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None):
     # ax.scatter(bmax[0], bmax[1], bmax[2], marker='.', linewidth=0, c='white', s=0)
     # print('####', bmin, bmax)
 
-    ax.set_xlim([bmin, bmax])
-    ax.set_ylim([bmin, bmax])
-    ax.set_zlim([bmin, bmax])
+    if reset_limits:
+        ax.set_xlim([bmin, bmax])
+        ax.set_ylim([bmin, bmax])
+        ax.set_zlim([bmin, bmax])
     ax.set_aspect('equal')
 
     return ax
@@ -180,5 +186,44 @@ def draw_camera(Rt, ax, scale=10):
 def draw_cameras(cameras, ax):
     from dshin import geom3d
     for camera in cameras:
-        geom3d.draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax,
-                           scale=0.1)
+        geom3d.draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=0.1)
+
+def plot_mesh(verts, faces):
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    fig = plt.figure(figsize=(12, 12))
+    ax = fig.add_subplot(111, projection='3d')
+
+    mesh = Poly3DCollection(verts[faces])
+    ax.add_collection3d(mesh)
+
+    bmax = verts.max(axis=0)
+    bmin = verts.min(axis=0)
+    padding = (bmax - bmin) / 10
+    bmax += padding
+    bmin -= padding
+
+    ax.set_xlim(bmin[0], bmax[0])
+    ax.set_ylim(bmin[1], bmax[1])
+    ax.set_zlim(bmin[2], bmax[2])
+
+    plt.show()
+
+
+def open_in_meshlab(verts, faces):
+    import tempfile
+    import os
+    with tempfile.NamedTemporaryFile(prefix='mesh_', suffix='.off',
+                                     delete=False) as fp:
+        fp.write('OFF\n{} {} 0\n'.format(verts.shape[0], faces.shape[0]).encode(
+                'utf-8'))
+        np.savetxt(fp, verts, fmt='%.5f')
+        np.savetxt(fp, np.hstack((3 * np.ones((faces.shape[0], 1)), faces)),
+                   fmt='%d')
+        fname = fp.name
+    os.system(
+            'while [ ! -f {fname} ]; do sleep 0.5; done; meshlab {fname}'.format(
+                    fname=fname))
+
+

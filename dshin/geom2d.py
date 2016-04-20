@@ -3,7 +3,6 @@ import numpy as np
 from matplotlib.patches import Polygon
 import matplotlib.cm as cm
 
-
 def draw_triangles(triangles, ax=None, facecolor='blue', alpha=1):
     """
     :param triangles: (n,3,2) 2d triangles.
@@ -24,7 +23,6 @@ def draw_triangles(triangles, ax=None, facecolor='blue', alpha=1):
     ax.set_xlim([triangles[:, :, 0].min(), triangles[:, :, 0].max()])
     ax.set_ylim([triangles[:, :, 1].min(), triangles[:, :, 1].max()])
 
-
 def pts(xy, ax=None, markersize=10):
     if ax is None:
         fig = pt.figure()
@@ -32,9 +30,8 @@ def pts(xy, ax=None, markersize=10):
 
     ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize)
 
-
-def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y'):
-    g = cm.get_cmap('gray')
+def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', cmap='gray'):
+    g = cm.get_cmap(cmap, 1024 * 2)
     g.set_bad(nancolor, 1.)
 
     if ax is None:
@@ -49,12 +46,10 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y'):
     cax = divider.append_axes("right", size="5%", pad=0.05)
     # cb = ax.figure.colorbar(ii)
     cb = pt.colorbar(ii, cax=cax)
-    cb.ax.tick_params(labelsize=4)
+    cb.ax.tick_params(labelsize=10)
     if clim is not None:
         # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
-
-
 
 def montage(images, gridwidth=None, empty_value=0):
     if type(images) is not list:

@@ -2,7 +2,7 @@ from os import path
 import sys
 import os
 import numpy as np
-
+import hashlib
 
 def read_mesh(filename):
     """
@@ -15,7 +15,6 @@ def read_mesh(filename):
         return read_off(filename)
     if filename.endswith('.ply'):
         return read_ply(filename)
-
 
 def read_off(filename):
     filename = path.expanduser(filename)
@@ -55,7 +54,6 @@ def read_off(filename):
         'f': faces,
     }
 
-
 def read_ply(filename):
     from plyfile import PlyData
     plydata = PlyData.read(filename)
@@ -67,7 +65,6 @@ def read_ply(filename):
         'v': v,
         'f': f,
     }
-
 
 def save_off(mesh, filename):
     verts = mesh['v'].astype(np.float32)
@@ -81,3 +78,10 @@ def save_off(mesh, filename):
         np.savetxt(fp, verts, fmt='%.5f')
         np.savetxt(fp, np.hstack((3 * np.ones((
             faces.shape[0], 1)), faces)), fmt='%d')
+
+def sha1(objs):
+    assert isinstance(objs, list), isinstance(objs, tuple)
+    sha1 = hashlib.sha1()
+    for obj in objs:
+        sha1.update(str(obj).encode('utf8'))
+    return sha1.hexdigest()

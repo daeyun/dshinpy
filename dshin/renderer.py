@@ -1,6 +1,6 @@
 import numpy as np
 import time
-
+from dshin import log
 
 def render_depth(vertices, P, rasterizer_func, out_wh=(512, 512), lrtb=(0, 511, 0, 511),
                  is_perspective=True, flip_z=True, near=None,
@@ -44,7 +44,11 @@ def render_depth(vertices, P, rasterizer_func, out_wh=(512, 512), lrtb=(0, 511, 
     zmax = pts[:, 2].max(axis=0)
     zmin = pts[:, 2].min(axis=0)
 
-    off = max((zmax - zmin) / 1e5, 1e-30)
+    if zmax == zmin:
+        off = 0.1
+        log.warn('zmax: %.3f, zmin: %.3f', zmax, zmin)
+    else:
+        off = max(abs(zmax - zmin) / 100, 1e-30)
 
     if near is None:
         near = zmin
@@ -74,7 +78,6 @@ def render_depth(vertices, P, rasterizer_func, out_wh=(512, 512), lrtb=(0, 511, 
     depth = np.ma.array(depth, mask=mask, dtype=np.float32)
     return np.flipud(depth)
 
-
 def render_silhouette(vertices, P, out_wh=(512, 512), lrtb=(0, 511, 0, 511),
                       is_perspective=True, flip_z=True, near=None, far=None):
     """
@@ -85,7 +88,6 @@ def render_silhouette(vertices, P, out_wh=(512, 512), lrtb=(0, 511, 0, 511),
                            near=near, far=None, raw_zbuffer=True)
     silhouette = zbuffer != ((1 << 32) - 1)
     return silhouette
-
 
 def ortho34(left, right, bottom, top, znear, zfar):
     """
