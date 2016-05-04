@@ -406,7 +406,8 @@ try:
 except ImportError:
   termios = None
 
-import gflags_validators
+from dshin.third_party import gflags_validators
+# import gflags_validators
 # pylint: enable-msg=C6204
 
 
