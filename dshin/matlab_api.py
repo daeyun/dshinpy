@@ -3,6 +3,7 @@ import matlab.engine
 import numpy as np
 import copy
 from dshin import log
+from os import path
 
 _matlab_engine = None
 
@@ -14,27 +15,39 @@ def engine():
     return _matlab_engine
 
 def set_workdir(workdir_path):
+    assert path.isdir(workdir_path)
     eng = engine()
     eng.cd(workdir_path)
     eng.addpath(eng.genpath(workdir_path))
 
-def fit_mesh_to_voxel_space(mesh, res=50, padding=0):
+def fit_mesh_to_voxel_space(mesh, res=50, padding=0, bmin=None, bmax=None):
     assert mesh['v'].shape[1] == 3
     assert mesh['f'].shape[1] == 3
 
     mesh = copy.deepcopy(mesh)
 
-    mesh['v'] -= mesh['v'].min(0)
-    mesh['v'] = mesh['v'] * (res - 1 - padding * 2) / mesh['v'].max() + 1
+    if bmin is None:
+        bmin = mesh['v'].min(0)
+    if bmax is None:
+        bmax = mesh['v'].max(0)
 
-    mesh['v'] += ((res - padding * 2) - mesh['v'].max(0)) / 2.0
+    if not isinstance(bmin, np.ndarray):
+        bmin = np.array(bmin)
+    if not isinstance(bmax, np.ndarray):
+        bmax = np.array(bmax)
+
+    mesh['v'] -= bmin
+    mesh['v'] *= (res - 1 - padding * 2) / (bmax - bmin).max() + 1
+
+    bbmax = (bmax - bmin) * (res - 1 - padding * 2) / (bmax - bmin).max() + 1
+    mesh['v'] += ((res - padding * 2) - bbmax) / 2.0
 
     mesh['v'] += padding
 
     return mesh
 
-def voxelize_mesh(mesh, res=50, padding=0):
-    mesh = fit_mesh_to_voxel_space(mesh, res, padding)
+def voxelize_mesh(mesh, res=50, padding=0, bmin=None, bmax=None):
+    mesh = fit_mesh_to_voxel_space(mesh, res, padding, bmin=bmin, bmax=bmax)
 
     # Assumes vertices are 0-indexed.
     mesh = {
@@ -82,7 +95,7 @@ def sample_points_in_mesh(mesh):
 
     # Assumes vertices are 0-indexed.
     mesh = {
-        'f'   : matlab.double((mesh['f'].T + 1).tolist()),
+        'f': matlab.double((mesh['f'].T + 1).tolist()),
         'v': matlab.double((mesh['v'].T).tolist()),
     }
     eng = engine()

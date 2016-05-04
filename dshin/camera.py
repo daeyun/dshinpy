@@ -1,7 +1,5 @@
 import numpy as np
 import scipy.linalg as la
-import functools
-from dshin import transforms
 
 class Camera(object):
     def __init__(self, R, t, s, is_world_to_cam=True):
