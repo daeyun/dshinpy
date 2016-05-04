@@ -7,7 +7,6 @@ Changelog: 2016/02  Removed gflags dependency.
 import logging
 import time
 
-
 def format_message(record):
     try:
         record_message = '%s' % (record.msg % record.args)
@@ -15,13 +14,12 @@ def format_message(record):
         record_message = record.msg
     return record_message
 
-
 class GlogFormatter(logging.Formatter):
     LEVEL_MAP = {
         logging.FATAL: 'F',
         logging.ERROR: 'E',
-        logging.WARN: 'W',
-        logging.INFO: 'I',
+        logging.WARN : 'W',
+        logging.INFO : 'I',
         logging.DEBUG: 'D'
     }
 
@@ -43,15 +41,12 @@ class GlogFormatter(logging.Formatter):
         record.getMessage = lambda: record_message
         return logging.Formatter.format(self, record)
 
-
 logger = logging.getLogger()
 handler = logging.StreamHandler()
-
 
 def setLevel(newlevel):
     logger.setLevel(newlevel)
     logger.debug('Log level set to %s', newlevel)
-
 
 debug = logging.debug
 info = logging.info
@@ -71,8 +66,8 @@ FATAL = logging.FATAL
 
 _level_names = {
     DEBUG: 'DEBUG',
-    INFO: 'INFO',
-    WARN: 'WARN',
+    INFO : 'INFO',
+    WARN : 'WARN',
     ERROR: 'ERROR',
     FATAL: 'FATAL'
 }
@@ -80,16 +75,16 @@ _level_names = {
 _level_letters = [name[0] for name in _level_names.values()]
 
 GLOG_PREFIX_REGEX = (
-    r"""
-    (?x) ^
-    (?P<severity>[%s])
-    (?P<month>\d\d)(?P<day>\d\d)\s
-    (?P<hour>\d\d):(?P<minute>\d\d):(?P<second>\d\d)
-    \.(?P<microsecond>\d{6})\s+
-    (?P<process_id>-?\d+)\s
-    (?P<filename>[a-zA-Z<_][\w._<>-]+):(?P<line>\d+)
-    \]\s
-    """) % ''.join(_level_letters)
+                        r"""
+                        (?x) ^
+                        (?P<severity>[%s])
+                        (?P<month>\d\d)(?P<day>\d\d)\s
+                        (?P<hour>\d\d):(?P<minute>\d\d):(?P<second>\d\d)
+                        \.(?P<microsecond>\d{6})\s+
+                        (?P<process_id>-?\d+)\s
+                        (?P<filename>[a-zA-Z<_][\w._<>-]+):(?P<line>\d+)
+                        \]\s
+                        """) % ''.join(_level_letters)
 """Regex you can use to parse glog line prefixes."""
 
 # Defaults

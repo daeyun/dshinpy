@@ -1,18 +1,13 @@
+import itertools
+import tempfile
+import os
 import numpy as np
 import matplotlib.pyplot as pt
-from mpl_toolkits.mplot3d import art3d
 import scipy.linalg as la
-
-import itertools
-import math
-
+from mpl_toolkits.mplot3d import art3d
 from matplotlib.patches import FancyArrowPatch
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from mpl_toolkits.mplot3d import proj3d
-from dshin import transforms
-
-
-# from mpl_toolkits import mplot3d
-
 
 def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
     lines = np.array(lines, dtype=np.float)
@@ -41,7 +36,6 @@ def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
 
     return ax
 
-
 def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None):
     if ax is None:
         fig = pt.figure()
@@ -52,7 +46,7 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         ax.set_zlabel('Z')
         ax.set_aspect('equal')
     if cam_sph is not None:
-        ax.view_init(elev=90-cam_sph[1], azim=cam_sph[2])
+        ax.view_init(elev=90 - cam_sph[1], azim=cam_sph[2])
 
     if type(lim) == list:
         lim = np.array(lim)
@@ -71,10 +65,6 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         bmin = lim.ravel()[:3]
         bmax = lim.ravel()[3:6]
 
-    # ax.scatter(bmin[0], bmin[1], bmin[2], marker='.', linewidth=0, c='white', s=0)
-    # ax.scatter(bmax[0], bmax[1], bmax[2], marker='.', linewidth=0, c='white', s=0)
-    # print('####', bmin, bmax)
-
     if reset_limits:
         ax.set_xlim([bmin, bmax])
         ax.set_ylim([bmin, bmax])
@@ -82,7 +72,6 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
     ax.set_aspect('equal')
 
     return ax
-
 
 def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1,
            linewidth=1):
@@ -107,7 +96,6 @@ def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1,
 
     ax.plot_wireframe(x, y, z, color=color, linewidth=linewidth, alpha=alpha)
 
-
 def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
          linewidth=1):
     if ax is None:
@@ -118,13 +106,12 @@ def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
 
     r = [-radius, radius]
     pts = np.array([[s, e] for s, e in itertools.combinations(
-        np.array(list(itertools.product(r, r, r))), 2) if
+            np.array(list(itertools.product(r, r, r))), 2) if
                     np.sum(np.abs(s - e)) == r[1] - r[0]])
     pts += center_xyz
 
     for s, e, in pts:
         ax.plot3D(*zip(s, e), color=color, alpha=alpha, linewidth=linewidth)
-
 
 class Arrow3D(FancyArrowPatch):
     def __init__(self, xs, ys, zs, *args, **kwargs):
@@ -136,7 +123,6 @@ class Arrow3D(FancyArrowPatch):
         xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, renderer.M)
         self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
         FancyArrowPatch.draw(self, renderer)
-
 
 def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
                    text=None):
@@ -151,7 +137,6 @@ def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
         text_z = pos.dot(zs[:, None])[0][0]
         ax.text(text_x, text_y, text_z, text, color='black')
 
-
 def draw_arrow_3d(start_pts, end_pts, ax, colors='red', texts=None):
     xs = np.hstack((start_pts[:, 0, None], end_pts[:, 0, None]))
     ys = np.hstack((start_pts[:, 1, None], end_pts[:, 1, None]))
@@ -161,7 +146,6 @@ def draw_arrow_3d(start_pts, end_pts, ax, colors='red', texts=None):
                                                                     np.ndarray) else colors
         text = texts[i] if isinstance(texts, list) else None
         draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text)
-
 
 def draw_camera(Rt, ax, scale=10):
     """
@@ -182,18 +166,14 @@ def draw_camera(Rt, ax, scale=10):
 
     pt.draw()
 
-
 def draw_cameras(cameras, ax):
-    from dshin import geom3d
     for camera in cameras:
-        geom3d.draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=0.1)
+        draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=0.1)
 
-def plot_mesh(verts, faces):
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    fig = plt.figure(figsize=(12, 12))
-    ax = fig.add_subplot(111, projection='3d')
+def plot_mesh(verts, faces, ax=None):
+    if ax is None:
+        fig = pt.figure(figsize=(12, 12))
+        ax = fig.add_subplot(111, projection='3d')
 
     mesh = Poly3DCollection(verts[faces])
     ax.add_collection3d(mesh)
@@ -207,13 +187,13 @@ def plot_mesh(verts, faces):
     ax.set_xlim(bmin[0], bmax[0])
     ax.set_ylim(bmin[1], bmax[1])
     ax.set_zlim(bmin[2], bmax[2])
+    ax.set_aspect('equal')
 
-    plt.show()
+    pt.show()
 
+    return ax
 
 def open_in_meshlab(verts, faces):
-    import tempfile
-    import os
     with tempfile.NamedTemporaryFile(prefix='mesh_', suffix='.off',
                                      delete=False) as fp:
         fp.write('OFF\n{} {} 0\n'.format(verts.shape[0], faces.shape[0]).encode(
@@ -222,8 +202,4 @@ def open_in_meshlab(verts, faces):
         np.savetxt(fp, np.hstack((3 * np.ones((faces.shape[0], 1)), faces)),
                    fmt='%d')
         fname = fp.name
-    os.system(
-            'while [ ! -f {fname} ]; do sleep 0.5; done; meshlab {fname}'.format(
-                    fname=fname))
-
-
+    os.system('while [ ! -f {fname} ]; do sleep 0.5; done; meshlab {fname}'.format(fname=fname))

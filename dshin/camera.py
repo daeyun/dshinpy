@@ -60,16 +60,26 @@ class Camera(object):
 class OrthographicCamera(Camera):
     @classmethod
     def from_Rt(cls, Rt: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1), wh=(64, 64), is_world_to_cam=True):
-        return OrthographicCamera(Rt[:, :3], Rt[:, 3], s=1, trbl=(1, 1, -1, -1))
+        return OrthographicCamera(Rt[:, :3], Rt[:, 3], s=s, trbl=trbl, wh=wh, is_world_to_cam=is_world_to_cam)
 
     def __init__(self, R: np.ndarray, t: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1),
                  wh=(64, 64), is_world_to_cam=True):
-        super().__init__(R, t, s)
+        super().__init__(R, t, s, is_world_to_cam=is_world_to_cam)
         self.trbl = trbl
         self.wh = wh
 
-    def world_to_image(self, xyzs, filter_invalid=False):
-        return self.cam_to_image(self.world_to_cam(xyzs), filter_invalid=filter_invalid)
+    def world_to_image(self, xyzs, filter_invalid=False, return_z=False):
+        campts = self.world_to_cam(xyzs)
+        xy, valid_inds = self.cam_to_image(campts, filter_invalid=False)
+        depth = campts[:, 2]
+
+        if filter_invalid:
+            xy = xy[valid_inds]
+            depth = depth[valid_inds]
+
+        if return_z:
+            return xy, valid_inds, depth
+        return xy, valid_inds
 
     def cam_to_image(self, xyzs, filter_invalid=False):
         xy = xyzs[:, :2]
@@ -179,4 +189,3 @@ def camera_fixation_centroid(cameras):
     b = np.array(b)[:, None]
     x = la.lstsq(A, b)[0].ravel()
     return x
-

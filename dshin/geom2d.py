@@ -23,12 +23,12 @@ def draw_triangles(triangles, ax=None, facecolor='blue', alpha=1):
     ax.set_xlim([triangles[:, :, 0].min(), triangles[:, :, 0].max()])
     ax.set_ylim([triangles[:, :, 1].min(), triangles[:, :, 1].max()])
 
-def pts(xy, ax=None, markersize=10):
+def pts(xy, ax=None, markersize=10, color='r'):
     if ax is None:
         fig = pt.figure()
         ax = fig.gca()
 
-    ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize)
+    ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize, c=color)
 
 def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', cmap='gray'):
     g = cm.get_cmap(cmap, 1024 * 2)
@@ -50,6 +50,7 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', 
     if clim is not None:
         # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
+    return ax
 
 def montage(images, gridwidth=None, empty_value=0):
     if type(images) is not list:

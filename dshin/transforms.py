@@ -3,8 +3,10 @@ import numpy
 import numpy as np
 import scipy.linalg as la
 import skimage
+import scipy.ndimage as spndim
 from dshin import stats
 from dshin import camera
+from dshin import log
 
 def translate(M, x, y=None, z=None):
     """
@@ -446,3 +448,24 @@ def depth_normals(depth, worldpts, viewdir, window_size=5, min_near_pts=4, visua
     imxyz[np.isnan(normals)] = np.nan
 
     return normals, imxyz
+
+def rescale_and_recenter(image, hw=(64, 64), padding=1):
+    assert 2 == len(image.shape)
+    # Crop margins with nan values.
+    y, x = np.where(~np.isnan(image))
+    try:
+        h, w = y.max() - y.min() + 1, x.max() - x.min() + 1
+        center = int(y.min() + h / 2), int(x.min() + w / 2)
+        image = image[center[0] - h / 2:center[0] + h / 2, center[1] - w / 2:center[1] + w / 2]
+        # Resize.
+        longest = max(zip(image.shape, hw))
+        resize = (longest[1]-padding*2) / longest[0]
+        resized = spndim.zoom(image, zoom=resize, order=0, mode='constant', cval=np.nan)
+        h, w = resized.shape
+        output = np.full(hw, np.nan)
+        hstart, wstart = int((output.shape[0] - h) / 2 + 0.5), int((output.shape[1] - w) / 2 + 0.5)
+        output[hstart:hstart + h, wstart:wstart + w] = resized
+    except Exception as ex:
+        log.warn(str(ex))
+        output = np.full(hw, np.nan)
+    return output
