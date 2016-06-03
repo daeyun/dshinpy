@@ -1,4 +1,5 @@
 import matplotlib.pyplot as pt
+import matplotlib.ticker as pt_ticker
 import numpy as np
 from matplotlib.patches import Polygon
 import matplotlib.cm as cm
@@ -30,7 +31,7 @@ def pts(xy, ax=None, markersize=10, color='r'):
 
     ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize, c=color)
 
-def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', cmap='gray'):
+def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True):
     g = cm.get_cmap(cmap, 1024 * 2)
     g.set_bad(nancolor, 1.)
 
@@ -38,15 +39,33 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', 
         fig = pt.figure()
         ax = fig.gca()
 
+    pt.grid(True)
+    for tic in ax.xaxis.get_major_ticks():
+        tic.tick1On = tic.tick2On = False
+        tic.label1On = tic.label2On = False
+    for tic in ax.yaxis.get_major_ticks():
+        tic.tick1On = tic.tick2On = False
+        tic.label1On = tic.label2On = False
+
+    if grid is not None:
+        ax.xaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
+        ax.yaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
+
     ii = ax.imshow(depth, cmap=g, interpolation='nearest', aspect='equal')
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     divider = make_axes_locatable(ax)
-
-    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cax = divider.append_axes("right", size="3%", pad=0.05)
     # cb = ax.figure.colorbar(ii)
     cb = pt.colorbar(ii, cax=cax)
-    cb.ax.tick_params(labelsize=10)
+    cb.ax.tick_params(labelsize=8)
+
+    if not show_colorbar_ticks:
+        for label in cb.ax.xaxis.get_ticklabels():
+            label.set_visible(False)
+        for label in cb.ax.yaxis.get_ticklabels():
+            label.set_visible(False)
+
     if clim is not None:
         # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
