@@ -4,6 +4,7 @@ import numpy as np
 from matplotlib.patches import Polygon
 import matplotlib.cm as cm
 
+
 def draw_triangles(triangles, ax=None, facecolor='blue', alpha=1):
     """
     :param triangles: (n,3,2) 2d triangles.
@@ -24,6 +25,7 @@ def draw_triangles(triangles, ax=None, facecolor='blue', alpha=1):
     ax.set_xlim([triangles[:, :, 0].min(), triangles[:, :, 0].max()])
     ax.set_ylim([triangles[:, :, 1].min(), triangles[:, :, 1].max()])
 
+
 def pts(xy, ax=None, markersize=10, color='r'):
     if ax is None:
         fig = pt.figure()
@@ -31,7 +33,14 @@ def pts(xy, ax=None, markersize=10, color='r'):
 
     ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize, c=color)
 
-def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True):
+
+def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax=None,
+               clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True):
+
+    in_order = in_order.lower()
+    if in_order != 'hw':
+        depth = montage(depth, in_order=in_order, gridwidth=grid_width)
+
     g = cm.get_cmap(cmap, 1024 * 2)
     g.set_bad(nancolor, 1.)
 
@@ -71,9 +80,17 @@ def draw_depth(depth: np.ma.core.MaskedArray, ax=None, clim=None, nancolor='y', 
         cb.set_clim(clim)
     return ax
 
-def montage(images, gridwidth=None, empty_value=0):
-    if type(images) is not list:
-        images = [images[i] for i in range(images.shape[0])]
+
+def montage(images, in_order='chw', gridwidth=None, empty_value=0):
+    images = np.array(images)
+
+    assert images.ndim == len(in_order)
+
+    target_order = 'chw'
+    if in_order.lower() != target_order:
+        images = images.transpose([in_order.lower().index(ch) for ch in target_order])
+
+    images = [images[i] for i in range(images.shape[0])]
     imtype = images[0].dtype
 
     if gridwidth is None:

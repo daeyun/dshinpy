@@ -22,7 +22,7 @@ int render_depth(const double *vertices, const size_t num_points, const int w,
 
   CHECK(num_points % 3 == 0, "num_points must be a multiple of 3");
 
-  OSMesaContext context = OSMesaCreateContextExt(OSMESA_RGB, 32, 0, 0, NULL);
+  OSMesaContext context = OSMesaCreateContextExt(OSMESA_RGBA, 32, 0, 0, NULL);
 
   void *buffer = malloc(w * h * 3 * sizeof(uint8_t));
 
@@ -52,7 +52,7 @@ int render_depth(const double *vertices, const size_t num_points, const int w,
   }
   glEnd();
 
-  glFinish();
+  /*glFinish();*/
 
   GLint out_width, out_height, bytes_per_value;
   uint32_t *depth_buffer;

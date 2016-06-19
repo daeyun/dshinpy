@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.linalg as la
 
+
 class Camera(object):
     def __init__(self, R, t, s, is_world_to_cam=True):
         if not is_world_to_cam:
@@ -55,6 +56,7 @@ class Camera(object):
     def _check_orthogonal(cls, R, eps=1e-4):
         assert la.norm(R.T - la.inv(R), 2) < eps
 
+
 class OrthographicCamera(Camera):
     @classmethod
     def from_Rt(cls, Rt: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1), wh=(64, 64), is_world_to_cam=True):
@@ -96,6 +98,7 @@ class OrthographicCamera(Camera):
         if filter_invalid:
             return xy[valid_inds], np.where(valid_inds)[0]
         return xy, np.where(valid_inds)[0]
+
 
 class PerspectiveCamera(Camera):
     def __init__(self, R: np.ndarray, t: np.ndarray, K: np.ndarray = None, s: float = 1.0, is_world_to_cam=True):
@@ -168,6 +171,7 @@ class PerspectiveCamera(Camera):
 
     def projection_mat34(self):
         return self.K.dot(np.hstack((self.s * self.R, self.t)))
+
 
 def camera_fixation_centroid(cameras):
     lines = []

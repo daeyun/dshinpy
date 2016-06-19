@@ -1,12 +1,13 @@
 import math
 import numpy
+# import skimage
 import numpy as np
 import scipy.linalg as la
-import skimage
 import scipy.ndimage as spndim
 from dshin import stats
 from dshin import camera
 from dshin import log
+
 
 def translate(M, x, y=None, z=None):
     """
@@ -26,6 +27,7 @@ def translate(M, x, y=None, z=None):
          [0, 0, 0, 1]]
     T = np.array(T, dtype=np.float64).T
     M[...] = np.dot(M, T)
+
 
 def scale(M, x, y=None, z=None):
     """
@@ -47,6 +49,7 @@ def scale(M, x, y=None, z=None):
     S = np.array(S, dtype=np.float64).T
     M[...] = np.dot(M, S)
 
+
 def xrotate(theta, deg=True):
     """
     http://www.labri.fr/perso/nrougier/teaching/opengl/
@@ -56,11 +59,12 @@ def xrotate(theta, deg=True):
     cosT = math.cos(theta)
     sinT = math.sin(theta)
     R = numpy.array(
-            [[1.0, 0.0, 0.0, 0.0],
-             [0.0, cosT, -sinT, 0.0],
-             [0.0, sinT, cosT, 0.0],
-             [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, cosT, -sinT, 0.0],
+         [0.0, sinT, cosT, 0.0],
+         [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
     return R
+
 
 def yrotate(theta, deg=True):
     """
@@ -71,11 +75,12 @@ def yrotate(theta, deg=True):
     cosT = math.cos(theta)
     sinT = math.sin(theta)
     R = numpy.array(
-            [[cosT, 0.0, sinT, 0.0],
-             [0.0, 1.0, 0.0, 0.0],
-             [-sinT, 0.0, cosT, 0.0],
-             [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+        [[cosT, 0.0, sinT, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [-sinT, 0.0, cosT, 0.0],
+         [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
     return R
+
 
 def zrotate(theta, deg=True):
     """
@@ -86,11 +91,12 @@ def zrotate(theta, deg=True):
     cosT = math.cos(theta)
     sinT = math.sin(theta)
     R = numpy.array(
-            [[cosT, -sinT, 0.0, 0.0],
-             [sinT, cosT, 0.0, 0.0],
-             [0.0, 0.0, 1.0, 0.0],
-             [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+        [[cosT, -sinT, 0.0, 0.0],
+         [sinT, cosT, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
     return R
+
 
 def rotation_matrix(angle, direction, point=None, deg=True):
     """
@@ -116,6 +122,7 @@ def rotation_matrix(angle, direction, point=None, deg=True):
         M[:3, 3] = point - numpy.dot(R, point)
     return M
 
+
 def angle(v1, v2, axis=0, deg=False, ref_plane=None):
     """
     Angle between two vectors.
@@ -136,6 +143,7 @@ def angle(v1, v2, axis=0, deg=False, ref_plane=None):
         angle *= np.sign((crossprod * ref_plane).sum(axis=axis))
     return angle
 
+
 def frustum(left, right, bottom, top, znear, zfar):
     """
     http://www.labri.fr/perso/nrougier/teaching/opengl/
@@ -154,6 +162,7 @@ def frustum(left, right, bottom, top, znear, zfar):
     M[2, 3] = -1.0
     return M
 
+
 def perspective(fovy, aspect, znear, zfar):
     """
     http://www.labri.fr/perso/nrougier/teaching/opengl/
@@ -162,6 +171,7 @@ def perspective(fovy, aspect, znear, zfar):
     h = np.tan(fovy / 360.0 * np.pi) * znear
     w = h * aspect
     return frustum(-w, w, -h, h, znear, zfar)
+
 
 def lookat_matrix(cam_xyz, obj_xyz, up=(0, 0, 1)):
     """
@@ -193,6 +203,7 @@ def lookat_matrix(cam_xyz, obj_xyz, up=(0, 0, 1)):
 
     return MT
 
+
 def apply_Rt(Rt, pts, inverse=False):
     """
     :param Rt: (3,4)
@@ -206,6 +217,7 @@ def apply_Rt(Rt, pts, inverse=False):
         return Rtinv.dot(np.vstack((pts.T, np.ones((1, pts.shape[0]))))).T
     return Rt.dot(np.vstack((pts.T, np.ones((1, pts.shape[0]))))).T
 
+
 def ortho44(left, right, bottom, top, znear, zfar):
     assert (right != left)
     assert (bottom != top)
@@ -218,6 +230,7 @@ def ortho44(left, right, bottom, top, znear, zfar):
         [0, 0, 0, 1]
     ], dtype=np.float64)
 
+
 def apply44(M, pts):
     assert 2 == len(pts.shape)
     assert pts.shape[1] == 3
@@ -227,6 +240,7 @@ def apply44(M, pts):
         return (Mpts[:3, :] / Mpts[3, :]).T
     else:
         raise NotImplementedError()
+
 
 def normalize_mesh_vertices(mesh, up='+z'):
     # pts = mesh['v'][mesh['f']]
@@ -274,6 +288,7 @@ def normalize_mesh_vertices(mesh, up='+z'):
 
     return R.dot(M)
 
+
 def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
     d = depth.copy()
     if hasattr(depth, 'mask'):
@@ -302,6 +317,7 @@ def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
 
     # impts3d = apply_Rt(Rt, impts, inverse=True)
 
+
 def quaternion_matrix(quaternion):
     """Return homogeneous rotation matrix from quaternion.
     http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
@@ -320,6 +336,7 @@ def quaternion_matrix(quaternion):
         [q[1, 3] - q[2, 0], q[2, 3] + q[1, 0], 1.0 - q[1, 1] - q[2, 2], 0.0],
         [0.0, 0.0, 0.0, 1.0]])
 
+
 def random_rotation(is_homogeneous=False):
     v = np.random.randn(4)
     Q = quaternion_matrix(v / la.norm(v, ord=2))
@@ -328,6 +345,7 @@ def random_rotation(is_homogeneous=False):
     assert np.isclose(Q[3, 3], 1.0)
 
     return Q if is_homogeneous else Q[:3, :3]
+
 
 def xyz_to_sph(xyz):
     """
@@ -342,6 +360,7 @@ def xyz_to_sph(xyz):
     azimuth = np.arctan2(xyz[:, 1, None], xyz[:, 0, None])
     return np.hstack((r, inclination, azimuth)).reshape(xyz.shape)
 
+
 def sph_to_xyz(sph):
     r, inclination, azimuth = sph[:, 0], sph[:, 1], sph[:, 2]
     x = r * np.sin(inclination) * np.cos(azimuth)
@@ -350,6 +369,7 @@ def sph_to_xyz(sph):
     xyz = np.stack((x, y, z), axis=1)
     assert xyz.shape == sph.shape
     return xyz
+
 
 def spherical_coord_align_rotation(v1, v2):
     a = v1.copy()
@@ -369,6 +389,7 @@ def spherical_coord_align_rotation(v1, v2):
     assert np.allclose(la.det(Q), 1.0)
     return Q
 
+
 def pca_svd(X):
     """
     :param X: (n, d)
@@ -377,11 +398,14 @@ def pca_svd(X):
     _, s, V = la.svd(X - X.mean(axis=0))
     return V.T, s
 
+
 def depth_normals(depth, worldpts, viewdir, window_size=5, min_near_pts=4, visualize=False, ax=None):
     """
     :param viewdir: vector from camera to object. normals direction will be less than 90 degrees from viewdir.
     :return: 3-channel images filled with inward normals and worldpts. There may be discarded points.
     """
+    import skimage
+
     assert window_size % 2 == 1
     assert len(viewdir.shape) == 1
     assert np.isclose(la.norm(viewdir, 2), 1.0)
@@ -402,8 +426,8 @@ def depth_normals(depth, worldpts, viewdir, window_size=5, min_near_pts=4, visua
 
     padding_left, padding_right = int((window_size - 1) / 2), int((window_size - 1) / 2 + 0.5)
     windows = skimage.util.view_as_windows(
-            np.pad(imxyz, [[padding_left, padding_right], [padding_left, padding_right], [0, 0]],
-                   mode='constant', constant_values=np.nan), (window_size, window_size, 3), step=1)
+        np.pad(imxyz, [[padding_left, padding_right], [padding_left, padding_right], [0, 0]],
+               mode='constant', constant_values=np.nan), (window_size, window_size, 3), step=1)
 
     normals = np.full(imxyz.shape, np.nan, dtype=np.float32)
 
@@ -449,18 +473,35 @@ def depth_normals(depth, worldpts, viewdir, window_size=5, min_near_pts=4, visua
 
     return normals, imxyz
 
+
 def rescale_and_recenter(image, hw=(64, 64), padding=1):
     assert 2 == len(image.shape)
     # Crop margins with nan values.
     y, x = np.where(~np.isnan(image))
+
+    in_out_ratio = np.array(image.shape) / np.array(hw)
+    assert np.allclose(in_out_ratio, in_out_ratio[0])
+    in_out_ratio = in_out_ratio[0]
+
     try:
         h, w = y.max() - y.min() + 1, x.max() - x.min() + 1
         center = int(y.min() + h / 2), int(x.min() + w / 2)
-        image = image[center[0] - h / 2:center[0] + h / 2, center[1] - w / 2:center[1] + w / 2]
+        ystart = int(center[0] - h / 2)
+        yend = int(center[0] + h / 2)
+        xstart = int(center[1] - w / 2)
+        xend = int(center[1] + w / 2)
+        roi = image[ystart:yend, xstart:xend]
+
         # Resize.
-        longest = max(zip(image.shape, hw))
-        resize = (longest[1]-padding*2) / longest[0]
-        resized = spndim.zoom(image, zoom=resize, order=0, mode='constant', cval=np.nan)
+        ratios = np.array(roi.shape) / np.array(hw)
+        longest_axis = np.argmax(ratios)
+        im_scale = (hw[longest_axis] - padding * 2) / roi.shape[longest_axis] + 1e-8
+        resized = spndim.zoom(roi, zoom=im_scale, order=0, mode='constant', cval=np.nan)
+
+        # Depth values are rescaled so that this is a rigid 3D transformation.
+        value_scale = im_scale * in_out_ratio
+        resized *= value_scale
+
         h, w = resized.shape
         output = np.full(hw, np.nan)
         hstart, wstart = int((output.shape[0] - h) / 2 + 0.5), int((output.shape[1] - w) / 2 + 0.5)
@@ -468,4 +509,22 @@ def rescale_and_recenter(image, hw=(64, 64), padding=1):
     except Exception as ex:
         log.warn(str(ex))
         output = np.full(hw, np.nan)
+
+    assert np.allclose(output.shape, hw)
+
     return output
+
+
+def normalize_depth_image(image, hw=(64, 64)):
+    # Depth image is resized, recentered, and rescaled so
+    # that the resulting transformation is rigid in 3D.
+    resized_image = rescale_and_recenter(image, hw=hw, padding=0)
+
+    valid = ~np.isnan(resized_image)
+    if valid.sum() <= 0:
+        # Empty image.
+        return resized_image
+
+    # Returns a mean-centered image.
+    resized_image -= resized_image[valid].mean()
+    return resized_image

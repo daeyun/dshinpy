@@ -9,6 +9,7 @@ from matplotlib.patches import FancyArrowPatch
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from mpl_toolkits.mplot3d import proj3d
 
+
 def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
     lines = np.array(lines, dtype=np.float)
     lc = art3d.Line3DCollection(lines, linewidths=linewidths, colors=colors)
@@ -36,23 +37,28 @@ def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
 
     return ax
 
-def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None):
+
+def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None, colorbar=False, cmap=None, is_radians=False):
     if ax is None:
         fig = pt.figure()
         # ax = fig.add_subplot(111, projection='3d')
         ax = fig.gca(projection='3d')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.set_aspect('equal')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_aspect('equal')
     if cam_sph is not None:
+        if is_radians:
+            cam_sph = cam_sph / np.pi * 180
         ax.view_init(elev=90 - cam_sph[1], azim=cam_sph[2])
 
     if type(lim) == list:
         lim = np.array(lim)
 
-    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker='.', linewidth=0,
-               c=color, s=markersize)
+    p = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker='.', linewidth=0,
+                   c=color, s=markersize, cmap=cmap)
+    if colorbar:
+        pt.gcf().colorbar(p)
 
     if lim is None:
         bmax = (pts.max(axis=0).max(axis=0))
@@ -72,6 +78,7 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
     ax.set_aspect('equal')
 
     return ax
+
 
 def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1,
            linewidth=1):
@@ -96,6 +103,7 @@ def sphere(center_xyz=(0, 0, 0), radius=1, ax=None, color='red', alpha=1,
 
     ax.plot_wireframe(x, y, z, color=color, linewidth=linewidth, alpha=alpha)
 
+
 def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
          linewidth=1):
     if ax is None:
@@ -106,12 +114,13 @@ def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
 
     r = [-radius, radius]
     pts = np.array([[s, e] for s, e in itertools.combinations(
-            np.array(list(itertools.product(r, r, r))), 2) if
+        np.array(list(itertools.product(r, r, r))), 2) if
                     np.sum(np.abs(s - e)) == r[1] - r[0]])
     pts += center_xyz
 
     for s, e, in pts:
         ax.plot3D(*zip(s, e), color=color, alpha=alpha, linewidth=linewidth)
+
 
 class Arrow3D(FancyArrowPatch):
     def __init__(self, xs, ys, zs, *args, **kwargs):
@@ -123,6 +132,7 @@ class Arrow3D(FancyArrowPatch):
         xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, renderer.M)
         self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
         FancyArrowPatch.draw(self, renderer)
+
 
 def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
                    text=None):
@@ -137,7 +147,11 @@ def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
         text_z = pos.dot(zs[:, None])[0][0]
         ax.text(text_x, text_y, text_z, text, color='black')
 
-def draw_arrow_3d(start_pts, end_pts, ax, colors='red', texts=None):
+
+def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None):
+    if ax is None:
+        fig = pt.figure()
+        ax = fig.gca(projection='3d')
     xs = np.hstack((start_pts[:, 0, None], end_pts[:, 0, None]))
     ys = np.hstack((start_pts[:, 1, None], end_pts[:, 1, None]))
     zs = np.hstack((start_pts[:, 2, None], end_pts[:, 2, None]))
@@ -147,10 +161,14 @@ def draw_arrow_3d(start_pts, end_pts, ax, colors='red', texts=None):
         text = texts[i] if isinstance(texts, list) else None
         draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text)
 
-def draw_camera(Rt, ax, scale=10):
+
+def draw_camera(Rt, ax=None, scale=10):
     """
     :param Rt: (3,4)
     """
+    if ax is None:
+        fig = pt.figure()
+        ax = fig.gca(projection='3d')
     cam_xyz = -la.inv(Rt[:, :3]).dot(Rt[:, 3])
 
     R = Rt[:, :3]
@@ -166,17 +184,30 @@ def draw_camera(Rt, ax, scale=10):
 
     pt.draw()
 
+    return ax
+
+
 def draw_cameras(cameras, ax):
     for camera in cameras:
         draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=0.1)
 
-def plot_mesh(verts, faces, ax=None):
-    if ax is None:
-        fig = pt.figure(figsize=(12, 12))
-        ax = fig.add_subplot(111, projection='3d')
 
-    mesh = Poly3DCollection(verts[faces])
-    ax.add_collection3d(mesh)
+def plot_mesh(mesh, ax=None):
+    if ax is None:
+        fig = pt.figure()
+        # ax = fig.add_subplot(111, projection='3d')
+        ax = fig.gca(projection='3d')
+
+    verts = mesh['v']
+    faces = mesh['f']
+
+    poly3d = Poly3DCollection(verts[faces])
+    poly3d.set_alpha(0.8)
+    poly3d.set_facecolor('blue')
+    poly3d.set_edgecolor('gray')
+    poly3d.set_linewidth(0.1)
+
+    ax.add_collection3d(poly3d)
 
     bmax = verts.max(axis=0)
     bmin = verts.min(axis=0)
@@ -184,20 +215,30 @@ def plot_mesh(verts, faces, ax=None):
     bmax += padding
     bmin -= padding
 
+    # ax.set_xlim(bmin[0], bmax[0])
+    # ax.set_ylim(bmin[1], bmax[1])
+    # ax.set_zlim(bmin[2], bmax[2])
+    # ax.set_aspect('equal')
+
+    return ax
+
+
+def set_lims(ax, bb):
+    bmax = bb.max(0)
+    bmin = bb.min(0)
+
     ax.set_xlim(bmin[0], bmax[0])
     ax.set_ylim(bmin[1], bmax[1])
     ax.set_zlim(bmin[2], bmax[2])
-    ax.set_aspect('equal')
 
-    pt.show()
+    pts(np.array([bmax, bmin]), ax=ax, markersize=0)
 
-    return ax
 
 def open_in_meshlab(verts, faces):
     with tempfile.NamedTemporaryFile(prefix='mesh_', suffix='.off',
                                      delete=False) as fp:
         fp.write('OFF\n{} {} 0\n'.format(verts.shape[0], faces.shape[0]).encode(
-                'utf-8'))
+            'utf-8'))
         np.savetxt(fp, verts, fmt='%.5f')
         np.savetxt(fp, np.hstack((3 * np.ones((faces.shape[0], 1)), faces)),
                    fmt='%d')
