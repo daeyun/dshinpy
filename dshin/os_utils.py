@@ -15,14 +15,14 @@ def kill_children_processes():
             if len(children) == 0:
                 break
             for process in children:
-                process.send_signal(signal.SIGKILL)
+                process.send_signal(signal.SIGTERM)
         sys.exit()
     except:
         pass
 
 
 @contextlib.contextmanager
-def cleanup_on_exit(sig=signal.SIGKILL):
+def killpg_on_exit(sig=signal.SIGTERM):
     os.setpgrp()
     atexit.register(kill_children_processes)
     try:
