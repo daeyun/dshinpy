@@ -1,5 +1,7 @@
 import time
 import collections
+import contextlib
+from dshin import log
 
 
 class OpsPerSecond:
@@ -22,10 +24,23 @@ class OpsPerSecond:
         return self.counter
 
     def times(self, as_string=False):
-        out = len(self.wall_times) / sum(self.wall_times), len(self.cpu_times) / sum(self.cpu_times)
+        out = len(self.wall_times) / sum(self.wall_times), len(
+            self.cpu_times) / sum(self.cpu_times)
         if as_string:
             out = 'wall {0:.3f}, cpu {1:.3f} ops/sec'.format(*out)
         return out
+
+
+@contextlib.contextmanager
+def time_elapsed(msg=None):
+    start_time = time.time()
+
+    yield
+
+    if msg is None:
+        log.info("Time elapsed: %f", time.time() - start_time)
+    else:
+        log.info("%s - time elapsed: %f", msg, time.time() - start_time)
 
 
 if __name__ == '__main__':
