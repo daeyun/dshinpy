@@ -109,39 +109,43 @@ class NNModel(metaclass=abc.ABCMeta):
         self.seed = seed
         self.needs_initialization = True
 
-        with self.graph.as_default():
-            tf.set_random_seed(self.seed)
+        if self.seed is not None:
+            with self.graph.as_default():
+                # Graph-level random seed.
+                tf.set_random_seed(self.seed)
 
         if build:
-            with self.graph.as_default():
-                # Builds model in self.graph.
-                if self.seed is not None:
-                    # Graph-level random seed.
-                    tf.set_random_seed(self.seed)
+            self._build_model()
 
-                with tf.variable_scope(NNModel._placeholder_prefix):
-                    self.placeholders = self.default_placeholders()
-                    self.placeholders.extend(self._placeholders())
+    def _build_model(self):
+        """
+        Populates the graph using user-defined functions.
+        """
+        with self.graph.as_default():
+            with tf.variable_scope(NNModel._placeholder_prefix):
+                self.placeholders = self.default_placeholders()
+                self.placeholders.extend(self._placeholders())
 
-                self._model()
+            # Builds the main model.
+            self._model()
 
-                with tf.variable_scope('train'):
-                    minimize_op = self._minimize_op()
-                    assert isinstance(minimize_op, tf.Operation)
+            with tf.variable_scope('train'):
+                minimize_op = self._minimize_op()
+                assert isinstance(minimize_op, tf.Operation)
 
-                    # EMA apply ops.
-                    update_ops = self.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
-                    with tf.control_dependencies([minimize_op]):
-                        # Accessed by self['train/step$']
-                        tf.group(*update_ops, name='step')
+                # EMA apply ops.
+                update_ops = self.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
+                with tf.control_dependencies([minimize_op]):
+                    # Accessed by self['train/step$']
+                    tf.group(*update_ops, name='step')
 
-                self.saver = tf.train.Saver(
-                    name='saver',
-                    max_to_keep=10,
-                    keep_checkpoint_every_n_hours=0.5,
-                )
+            self.saver = tf.train.Saver(
+                name='saver',
+                max_to_keep=10,
+                keep_checkpoint_every_n_hours=0.5,
+            )
 
-            self.initialize()
+        self.initialize()
 
     @_cached
     def default_placeholders(self) -> typing.List[tf.Tensor]:
