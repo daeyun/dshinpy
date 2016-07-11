@@ -1,5 +1,7 @@
+"""
+Helper functions for building TensorFlow neural net layers.
+"""
 import math
-from distutils import version
 
 import numpy as np
 import tensorflow as tf
@@ -7,11 +9,9 @@ import tensorflow.python.framework.ops as tf_ops
 
 from dshin.third_party import gflags
 
-assert version.LooseVersion('0.8.0') <= version.LooseVersion(tf.__version__)
-
 FLAGS = gflags.FLAGS
 
-tf.app.flags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
+gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
 
 
 def _variable_on_cpu(name, shape, initializer, trainable=True):
@@ -20,7 +20,7 @@ def _variable_on_cpu(name, shape, initializer, trainable=True):
         return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
 
 
-def conv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv2d", padding='SAME', use_bias=True) -> tf_ops.Tensor:
+def conv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv2d", padding='SAME', use_bias=False) -> tf_ops.Tensor:
     assert input_tensor.get_shape().ndims == 4
 
     with tf.variable_scope(name):
@@ -36,7 +36,7 @@ def conv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv2d", padding=
         return tf.nn.bias_add(conv, b)
 
 
-def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padding='SAME', use_bias=True) -> tf_ops.Tensor:
+def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padding='SAME', use_bias=False) -> tf_ops.Tensor:
     assert input_tensor.get_shape().ndims == 4
 
     with tf.variable_scope(name):
@@ -66,7 +66,7 @@ def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padd
         return tf.nn.bias_add(deconv, b)
 
 
-def conv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv3d", padding='SAME', use_bias=True) -> tf_ops.Tensor:
+def conv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv3d", padding='SAME', use_bias=False) -> tf_ops.Tensor:
     assert input_tensor.get_shape().ndims == 5
 
     with tf.variable_scope(name):
@@ -82,7 +82,7 @@ def conv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv3d", padding=
         return tf.nn.bias_add(conv, b)
 
 
-def deconv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv3d', padding='SAME', use_bias=True) -> tf_ops.Tensor:
+def deconv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv3d', padding='SAME', use_bias=False) -> tf_ops.Tensor:
     assert input_tensor.get_shape().ndims == 5
 
     with tf.variable_scope(name):
@@ -111,8 +111,9 @@ def deconv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv3d', padd
         return tf.nn.bias_add(deconv, b)
 
 
-def linear(input_tensor: tf_ops.Tensor, n_out, name='linear', use_bias=True) -> tf_ops.Tensor:
+def linear(input_tensor: tf_ops.Tensor, n_out: int, name='linear', use_bias=False) -> tf_ops.Tensor:
     assert input_tensor.get_shape().ndims == 2
+    assert isinstance(n_out, int)
 
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
@@ -238,9 +239,9 @@ def ema_with_update_dependencies(values, initial_values=0.0, decay=0.99, name='e
         return identity_vars_with_update, shadow_vars_with_update, shadow_vars_without_update
 
 
-def batch_norm(value, is_local=None, name='bn', offset=0.0, scale=0.02, ema_decay=0.99, return_mean_var=False, is_trainable=True):
+def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=0.02, ema_decay=0.99, return_mean_var=False, is_trainable=True):
     """
-    is_training: tf.Tensor of type tf.bool. Indicates whether the output tensor should use local stats or
+    is_local: tf.Tensor of type tf.bool. Indicates whether the output tensor should use local stats or
     moving averages. It is not related to updating the shadow variables.
     For updating, use the following idiom from TensorFlow documentation:
 
@@ -252,9 +253,8 @@ def batch_norm(value, is_local=None, name='bn', offset=0.0, scale=0.02, ema_deca
             train_step = tf.group(*update_ops, name='step')
     ```
     """
-    assert isinstance(is_local, tf.Tensor)
-    assert is_local.dtype == tf.bool
     assert type(is_trainable) == bool
+    assert (isinstance(is_local, tf.Tensor) and is_local.dtype == tf.bool) or isinstance(is_local, bool)
 
     shape = value.get_shape().as_list()
     rank = len(shape)
@@ -275,12 +275,17 @@ def batch_norm(value, is_local=None, name='bn', offset=0.0, scale=0.02, ema_deca
         ema_batch_mean = ema_with_initial_value(batch_mean, 0.0, ema_trainer)
         ema_batch_var = ema_with_initial_value(batch_var, 1.0, ema_trainer)
 
-        mean, var = tf.cond(is_local, lambda: (batch_mean, batch_var), lambda: (ema_batch_mean, ema_batch_var))
+        if isinstance(is_local, tf.Tensor) and is_local.dtype == tf.bool:
+            mean, var = tf.cond(is_local, lambda: (batch_mean, batch_var), lambda: (ema_batch_mean, ema_batch_var))
+        else:
+            assert isinstance(is_local, bool)
+            mean, var = (batch_mean, batch_var) if is_local else (ema_batch_mean, ema_batch_var)
 
         bn = tf.nn.batch_normalization(value, mean, var, beta, gamma, 1e-5)
 
     if return_mean_var:
         return bn, mean, var
+
     return bn
 
 
@@ -327,7 +332,22 @@ def stack_batch_dim(value_list, name='batch_stack'):
     return out
 
 
-def residual_unit(x, is_training, nout=None, name='rn', mode='SAME', is_first=False):
+def apply_concat(value_list, factory, name_prefix='branch') -> tf.Tensor:
+    assert isinstance(value_list, list)
+    assert callable(factory)
+    branches = []
+    for i, value in enumerate(value_list):
+        assert isinstance(value, tf.Tensor)
+        with tf.variable_scope('{}{}'.format(name_prefix, i)):
+            out = factory(i, value)
+        assert isinstance(out, tf.Tensor)
+        branches.append(out)
+    last_dim = branches[0].get_shape().ndims - 1
+    out = tf.concat(last_dim, branches, name='{}_concat'.format(name_prefix))
+    return out
+
+
+def residual_unit(x, is_training, n_out=None, name='rn', mode='SAME', is_first=False):
     """Uses identity shortcut if nout is None.
     """
     assert mode in ['DOWNSAMPLE', 'UPSAMPLE', 'SAME']
@@ -343,8 +363,8 @@ def residual_unit(x, is_training, nout=None, name='rn', mode='SAME', is_first=Fa
     }[dims]
 
     nin = shape[-1]
-    if nout is None:
-        nout = nin
+    if n_out is None:
+        n_out = nin
 
     with tf.variable_scope(name):
         def shortcut(x):
@@ -353,16 +373,16 @@ def residual_unit(x, is_training, nout=None, name='rn', mode='SAME', is_first=Fa
                 split_out = fixed_unpool(split_out, mode='NEAREST', name='unpool')
             elif mode == 'DOWNSAMPLE':
                 split_out = fixed_pool(split_out, name='pool')
-            if nout > nin:
+            if n_out > nin:
                 padding = [[0, 0] for _ in range(len(shape))]
-                padding[-1] = [int(math.floor((nout - nin) / 2.0)), int(math.ceil((nout - nin) / 2.0))]
-                assert sum(padding[-1]) == nout - nin
+                padding[-1] = [int(math.floor((n_out - nin) / 2.0)), int(math.ceil((n_out - nin) / 2.0))]
+                assert sum(padding[-1]) == n_out - nin
                 split_out = tf.pad(split_out, padding, mode='CONSTANT', name='pad_shortcut')
-            elif nout < nin:
-                split_out = conv(split_out, nout, k=1, s=1, name='conv_shortcut', use_bias=False)
+            elif n_out < nin:
+                split_out = conv(split_out, n_out, k=1, s=1, name='conv_shortcut')
             return split_out
 
-        if nout != nin:
+        if n_out != nin:
             is_first = True
 
         if not is_first:
@@ -374,12 +394,12 @@ def residual_unit(x, is_training, nout=None, name='rn', mode='SAME', is_first=Fa
         if is_first:
             h = shortcut(x)
 
-        x = conv(x, nout, k=3, s=s, name='conv1', use_bias=False)
+        x = conv(x, n_out, k=3, s=s, name='conv1')
 
         x = batch_norm(x, is_training, name='bn2')
         x = lrelu(x, name='relu2')
 
-        x = conv(x, nout, k=3, s=1, name='conv2', use_bias=False)
+        x = conv(x, n_out, k=3, s=1, name='conv2')
 
         add = tf.add(h, x)
 

@@ -1,4 +1,21 @@
+"""
+Utility functions and classes for TensorFlow neural nets.
+"""
+from distutils import version
+
+import tensorflow as tf
+
+assert version.LooseVersion('0.9.0') <= version.LooseVersion(tf.__version__)
+
+from dshin.nn import types
 from dshin.nn import ops
+from dshin.nn import graph
 from dshin.nn import utils
-from dshin.nn import build
-from dshin.nn import encoder
+
+__all__ = [
+    'graph',
+    'hey',
+    'ops',
+    'types',
+    'utils',
+]

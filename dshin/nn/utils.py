@@ -1,72 +1,227 @@
+"""
+Helpers for managing TensorFlow neural net models.
+"""
 import abc
-import contextlib
-import time
 import functools
 import os
 import re
-import math
 import typing
-import tqdm
 from os import path
 
+import ensure
 import tensorflow as tf
 import toposort
 
 from dshin import log
-from dshin import timer
+from dshin import nn
+
+
+@ensure.ensure_annotations
+def sort_tensors(ops: nn.types.Operations) -> typing.Sequence[str]:
+    """
+    Sorts the inputs and outputs of TensorFlow Operations in topological order.
+
+    :param ops: List of Operations.
+    :return: Sorted list of Tensor names.
+    """
+    # http://stackoverflow.com/a/33851308
+    deps = {}
+    for op in ops:
+        # op node
+        op_inputs = set()
+        op_inputs.update([t.name for t in op.inputs])
+        deps[op.name] = op_inputs
+        # tensor output node
+        for t in op.outputs:
+            deps[t.name] = {op.name}
+
+    out = []
+    tensors = toposort.toposort(deps)
+    for tensor in tensors:
+        out.extend(list(tensor))
+
+    return out
+
+
+def match_names(values: nn.types.NamedSeq, pattern: str = None,
+                prefix: str = None, suffix: str = None) -> nn.types.NamedSeq:
+    """
+    Filters TensorFlow graph objects by regular expression.
+
+    :param values: A list of Variables, Tensors, or Operations.
+    :param pattern: A regular expression pattern.
+    :param prefix: A string prepended to `pattern`. Defaults to ``.*?``.
+    :param suffix: A string appended to `pattern`. Defaults to ``.*?``.
+    :return:
+    """
+    if pattern is None:
+        pattern = r'.*?'
+    if prefix is None:
+        prefix = r'.*?'
+    if suffix is None:
+        suffix = r'.*?'
+
+    final_pattern = prefix + pattern + suffix
+    matched = []
+    for item in values:
+        if re.match(final_pattern, item.name):
+            matched.append(item)
+    return matched
 
 
 class NNModel(metaclass=abc.ABCMeta):
-    """Neural network container.
+    """
+    TensorFlow neural net container.
     """
 
-    # TF graph collection keys.
-    UPDATE_OPS = tf.GraphKeys.UPDATE_OPS
-    TRAIN_OPS = 'train_ops'
-    PLACEHOLDERS = 'placeholders'
-    OUTPUTS = 'outputs'
-    LOSSES = 'losses'
-    INDICATORS = 'indicators'
-    METRICS = 'metrics'
-    IO = 'io'
+    _placeholder_prefix = 'placeholder'
+    _cached = functools.lru_cache(maxsize=2048, typed=True)
 
     @classmethod
-    def from_file(cls, restore_path):
-        net = cls()
+    def from_file(cls, restore_path: str):
+        """
+        A factory method that restores a previously saved model.
+
+        :param restore_path: The path used to save the model.
+        :return: NNModel instance.
+        """
+        net = cls(build=False)
         net.restore(restore_path=restore_path)
         return net
 
-    def __init__(self, graph: tf.Graph):
-        assert isinstance(graph, tf.Graph)
+    def __init__(self, sess: tf.Session = None, seed: int = None, build=True):
+        """
+        Creates a new model instance.
 
-        self.graph = graph
-        with self.graph.as_default():
-            self._build()
-            self.saver = tf.train.Saver(name='saver')
+        :param sess: A TensorFlow Session.
+        :param seed: The graph-level random seed.
+        :param build: If true, builds and initializes the model.
+        """
+        if sess is None:
+            self.graph = tf.Graph()
+            self.session = tf.Session(graph=self.graph)
+        else:
+            assert isinstance(sess, tf.Session)
+            self.graph = sess.graph
+            self.session = sess
 
-            if self.count('placeholder/is_training') != 1:
-                log.warn('"placeholder/is_training" is not defined.')
-
+        self.seed = seed
         self.needs_initialization = True
 
+        with self.graph.as_default():
+            tf.set_random_seed(self.seed)
+
+        if build:
+            with self.graph.as_default():
+                # Builds model in self.graph.
+                if self.seed is not None:
+                    # Graph-level random seed.
+                    tf.set_random_seed(self.seed)
+
+                with tf.variable_scope(NNModel._placeholder_prefix):
+                    self.placeholders = self.default_placeholders()
+                    self.placeholders.extend(self._placeholders())
+
+                self._model()
+
+                with tf.variable_scope('train'):
+                    minimize_op = self._minimize_op()
+                    assert isinstance(minimize_op, tf.Operation)
+
+                    # EMA apply ops.
+                    update_ops = self.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
+                    with tf.control_dependencies([minimize_op]):
+                        # Accessed by self['train/step$']
+                        tf.group(*update_ops, name='step')
+
+                self.saver = tf.train.Saver(name='saver')
+
+            self.initialize()
+
+    @_cached
+    def default_placeholders(self) -> typing.List[tf.Tensor]:
+        """
+        Default placeholders required for all models. They can be accessed
+        through `get` or `__getitem__`.
+
+        For example:
+        ::
+            x = self.get('placeholder/learning_rate')
+            x = self['placeholder/learning_rate']
+
+            # Equivalent if no other names contain 'learning_rate'.
+            x = self['learning_rate']
+
+        :return: List of placeholder tensors.
+        """
+        return [
+            tf.placeholder(tf.float32, name='learning_rate'),
+        ]
+
     @abc.abstractmethod
-    def _build(self):
+    def _placeholders(self) -> nn.types.Tensors:
+        """
+        Placeholders defined by the user.
+        Side effect: Populates self.graph.
+
+        :return: List of placeholder tensors.
+        """
+        return
+
+    @abc.abstractmethod
+    def _model(self):
+        """
+        TensorFlow model defined by the user. Return value is ignored.
+        Side effect: Populates self.graph.
+        """
+        return
+
+    @abc.abstractmethod
+    def _minimize_op(self) -> tf.Operation:
+        """
+        Loss minimization operation defined by the user.
+        Side effect: Populates self.graph.
+
+        For example:
+        ::
+            def _minimize_op(self):
+                loss = tf.reduce_mean((self._out - self['target']) ** 2, name='loss')
+                train_op = tf.train.AdamOptimizer(self['learning_rate']).minimize(loss)
+                return train_op
+
+        :return: A TensorFlow Operation.
+        """
         return
 
     def initialize(self):
+        """
+        Initializes all TensorFlow variables. Not needed when restoring from a file.
+        """
         if self.needs_initialization:
             with self.graph.as_default():
-                tf.initialize_all_variables().run(
-                    session=tf.get_default_session())
+                self.session.run(tf.initialize_all_variables())
                 self.needs_initialization = False
 
-    def restore(self, restore_path):
-        with self.graph.as_default():
-            self.saver.restore(tf.get_default_session(), restore_path)
-            self.needs_initialization = False
-            log.info("Restored model from %s", restore_path)
+    @ensure.ensure_annotations
+    def restore(self, restore_path: str):
+        """
+        Restores a previously saved model.
 
-    def save(self, save_path):
+        :param restore_path: The path used to save the model.
+        """
+        with self.graph.as_default():
+            with self.session.as_default():
+                self.saver.restore(tf.get_default_session(), restore_path)
+                log.info("Restored model from %s", restore_path)
+                self.needs_initialization = False
+
+    @ensure.ensure_annotations
+    def save(self, save_path: str):
+        """
+        Saves variables to a file.
+
+        :param save_path: Path to the checkpoint file.
+        """
         session = tf.get_default_session()
 
         with session.as_default():
@@ -77,138 +232,188 @@ class NNModel(metaclass=abc.ABCMeta):
                 log.info('mkdir %s', dirpath)
                 os.makedirs(dirpath)
 
-            save_path_out = self.saver.save(session, save_path)
+            # TODO(daeyun): Save graph def.
+            save_path_out = self.saver.save(session, save_path, write_meta_graph=True)
             log.info("Model saved to file: %s" % save_path_out)
 
-    def collection_str(self, pattern=r'.*'):
-        """ Return all matching names in any collection. Used for development.
-        :param pattern: Item is matched if this pattern is found in the name.
+    @ensure.ensure_annotations
+    def train(self, feed_dict: dict):
         """
-        out_str = ''
-        keys = self.graph.get_all_collection_keys()
-        for k in keys:
-            items = self.graph.get_collection(k)
-            out_str += k + '\n'
-            for item in items:
-                if re.match(pattern, item.name):
-                    out_str += '    ' + item.name + '\n'
-        return out_str
+        Runs a training step.
 
-    @functools.lru_cache(maxsize=2048, typed=True)
-    def __getitem__(self, pattern):
-        assert isinstance(pattern, str)
-        return self.get(pattern)
+        :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
+        or placeholder objects.
+        """
+        self.eval([], feed_dict=feed_dict, is_training=True)
 
-    @functools.lru_cache(maxsize=2048, typed=True)
-    def get_all(self, pattern, collection_key=None):
-        matched = []
-        keys = self.graph.get_all_collection_keys()
-        if collection_key is None:
-            for k in keys:
-                for item in self.graph.get_collection(k):
-                    if re.match(pattern, item.name):
-                        matched.append(item)
-        else:
-            assert collection_key in keys
-            for item in self.graph.get_collection(collection_key):
-                if re.match(pattern, item.name):
-                    matched.append(item)
-        return matched
+    @ensure.ensure_annotations
+    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, is_training: bool = False) -> dict:
+        """
+        Evaluates TensorFlow Operations.
 
-    @functools.lru_cache(maxsize=2048, typed=True)
-    def count(self, pattern):
-        return len(self.get_all(pattern))
+        :param tensors_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
+        also be regex patterns. Must be a list.
+        :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
+        or placeholder objects.
+        :param is_training: If true, executes a training step.
+        :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
+        """
+        assert not self.needs_initialization, 'Variables are not initialized.'
 
-    @functools.lru_cache(maxsize=2048, typed=True)
-    def get_all_ops(self, pattern):
-        matched = []
-        ops = self.graph.get_operations()
-        for op in ops:
-            if re.match(pattern, op.name):
-                matched.append(op)
-        return matched
-
-    def get(self, pattern, collection_key=None):
-        matched = self.get_all(pattern, collection_key)
-        if len(matched) != 1:
-            raise ValueError('len(matched) != 1. matched: \n{}\n{}'.format(
-                pattern, '\n'.join([item.name for item in matched])))
-        return matched[0]
-
-    @functools.lru_cache(maxsize=2048, typed=True)
-    def last(self, pattern=r'.*'):
-        sorted = self.toposort(pattern)
-        last = list(sorted[-1])
-        assert len(last) == 1
-        return self.graph.get_tensor_by_name(last[0])
-
-    @functools.lru_cache(1024)
-    def toposort(self, pattern=r'.*'):
-        ops = self.get_all_ops(pattern)
-
-        # http://stackoverflow.com/a/33851308
-        deps = {}
-        for op in ops:
-            # op node
-            op_inputs = set()
-            op_inputs.update([t.name for t in op.inputs])
-            deps[op.name] = op_inputs
-            # tensor output node
-            for t in op.outputs:
-                deps[t.name] = {op.name}
-        return list(toposort.toposort(deps))
-
-    def eval(self, tensor_or_op_patterns: typing.Sequence, feed_dict: dict,
-             is_training: bool = False):
-        assert isinstance(tensor_or_op_patterns, list)
-        assert isinstance(feed_dict, dict)
-
+        names = []
         new_feed_dict = {}
         for k, v in feed_dict.items():
             if isinstance(k, str):
                 new_feed_dict[self[k]] = v
+                names.append(self[k].name)
             elif isinstance(k, tf.Tensor):
                 new_feed_dict[k] = v
+                names.append(k.name)
             else:
                 raise ValueError('Unexpected key in feed_dict: {}'.format(k))
 
-        if self.count('placeholder/is_training') == 1:
-            new_feed_dict[self['placeholder/is_training']] = is_training
-        elif is_training:
-            raise ValueError(
-                'is_training is True, but placeholder/is_training is not found.')
-
-        # TODO(daeyun): warn if 'train/step' does not update moving averages.
-
-        sess = tf.get_default_session()
-        fetches = [self[pattern] for pattern in tensor_or_op_patterns]
+        fetches = [self[pattern] for pattern in tensors_or_patterns]
         if is_training:
-            # There might be a race condition here, but it does not matter most of the time.
-            fetches += [self['train/step']]
-        out_eval = sess.run(fetches, new_feed_dict)
+            assert (self['learning_rate'].name in names,
+                    'is_training is True. learning_rate should be in feed_dict')
+
+            # There is a race condition here, but it does not matter in most use cases.
+            fetches.append(self['train/step$'])
+        else:
+            assert (self['learning_rate'].name not in names,
+                    'is_training is False. learning_rate should not be in feed_dict')
+
+        with self.graph.as_default():
+            out_eval = self.session.run(fetches, new_feed_dict)
+
         results = {}
-        for name, result in zip(tensor_or_op_patterns, out_eval):
+        for name, result in zip(tensors_or_patterns, out_eval):
             if result is not None:
                 results[name] = result
         return results
 
+    def __getitem__(self, pattern: str) -> nn.types.Value:
+        """
+        Same as `get`. Returns a Variable or Tensor whose name uniquely matches the pattern.
+        :param pattern: A regular expression pattern.
+        :return: Matched variable or tensor.
+        """
+        return self.get(pattern)
 
+    @property
+    def variables(self) -> nn.types.Variables:
+        """
+        Returns all TensorFlow Variables defined in the graph.
 
+        :return: All variables in the graph.
+        """
+        return self.graph.get_collection(tf.GraphKeys.VARIABLES)
 
+    @property
+    def tensors(self) -> nn.types.Tensors:
+        """
+        Returns the output values of TensorFlow Operations defined in the graph.
 
+        :return: Output values of all operations in the graph.
+        """
+        out = []
+        for op in self.graph.get_operations():
+            out.extend(op.outputs)
+        return out
 
-class EncoderDecoder(NNModel):
-    def __init__(self, graph: tf.Graph, in_dims):
-        super().__init__(graph)
-        self.in_dims = in_dims
+    @property
+    def ops(self) -> nn.types.Operations:
+        """
+        Returns all TensorFlow Operations in the graph that do not have an output value.
 
-    def _build(self):
-        with tf.variable_scope('placeholder'):
-            in_shape = [None] + config.in_dims * [config.in_resolution] + [1]
-            x = tf.placeholder(tf.float32, shape=in_shape, name='input')
-            is_training = tf.placeholder(tf.bool, name='is_training')
+        :return: Operations that do not have an output value.
+        """
+        out = []
+        for op in self.graph.get_operations():
+            if len(op.outputs) == 0:
+                out.append(op)
+        return out
 
+    @property
+    def all_values(self) -> nn.types.Values:
+        """
+        Returns all TensorFlow Variables or Operations defined in the graph.
 
-if __name__ == '__main__':
-    graph = tf.Graph()
-    EncoderDecoder(graph)
+        :return: All variables and operations in the graph.
+        """
+        values = self.tensors + self.variables + self.ops
+        unique = {}
+        for tensor in values:
+            unique[tensor.name] = tensor
+        return list(unique.values())
+
+    @_cached
+    def count(self, pattern=None) -> int:
+        """
+        Returns the numbers of values whose name matches the pattern.
+
+        :param pattern: A regular expression pattern.
+        :return: Number of matching values.
+        """
+        return len(match_names(self.all_values, pattern))
+
+    @_cached
+    def collection(self, collection: str) -> nn.types.Values:
+        """
+        Retrieves values by a collection key.
+
+        :param collection: A graph collection key. Must exist.
+        :return: All values in the collection.
+        """
+        assert collection in self.graph.get_all_collection_keys()
+        return self.graph.get_collection(collection)
+
+    @_cached
+    def get(self, pattern: str, prefix=None, suffix=None) -> nn.types.Value:
+        """
+        Returns a variable or tensor whose name uniquely matches the pattern. If `pattern` is not
+        found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
+
+        :param pattern: A regular expression pattern.
+        :param prefix: Prefix for `pattern`. Defaults to ``.*?``.
+        :param suffix: Suffix for `pattern`. Defaults to ``.*?``.
+        :return: Matched variable or tensor.
+        :raises ValueError: If pattern matches more than one item.
+        """
+        matched = match_names(self.all_values, pattern, prefix=prefix, suffix=suffix)
+        if len(matched) != 1:
+            try:
+                assert not pattern.endswith(r':0$')
+                return self.get(pattern + r':0$', prefix=prefix, suffix='')
+            except Exception as ex:
+                raise ValueError('len(matched) = {}\npattern: {}\nmatched:\n{}'.format(
+                    len(matched), prefix + pattern + suffix, '\n'.join([item.name for item in matched])))
+        return matched[0]
+
+    @_cached
+    def sorted_values(self, pattern=None) -> nn.types.Tensors:
+        """
+        Topologically sorted Tensors.
+
+        :param pattern: A regular expression pattern. Defaults to ``.*?``.
+        :return: List of Tensors in topological order.
+        """
+        assert not self.needs_initialization
+
+        names = sort_tensors(match_names(self.ops, pattern))
+        return [self.get(name, prefix='^', suffix='$') for name in names]
+
+    @_cached
+    def last(self, pattern=None):
+        """
+        Last item in `self.sorted_values`. Guaranteed to not have any values that depend on it.
+        There may be more than one such value. Returns only one of them.
+
+        :param pattern: A regular expression pattern. Defaults to ``.*?``.
+        :return: Last item in `self.sorted_values`.
+        """
+        assert not self.needs_initialization
+
+        values = self.sorted_values(pattern=pattern)
+        assert len(values) > 0
+        return values[-1]
