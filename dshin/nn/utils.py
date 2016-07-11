@@ -334,8 +334,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
         fetches = [self[pattern] for pattern in tensors_or_patterns]
         if is_training:
-            assert (self['learning_rate'].name in names,
-                    'learning_rate should be in feed_dict when is_training is True.')
+            assert self['learning_rate'].name in names, \
+                   'learning_rate should be in feed_dict when is_training is True.'
 
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
