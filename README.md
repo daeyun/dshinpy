@@ -1,9 +1,16 @@
 ```
 cd ~/git/
-git clone git@bitbucket.org:daeyun/dshinpy.git
-# git clone https://daeyun@bitbucket.org/daeyun/dshinpy.git
+git clone git@github.com:daeyun/dshinpy.git
+# git clone https://github.com/daeyun/dshinpy.git
 ```
 
 ```
 export PYTHONPATH="$HOME/git/dshinpy/:${PYTHONPATH}"
+```
+
+## Running tests
+
+```
+# Runs doctests and tests in ./tests.
+py.test
 ```
