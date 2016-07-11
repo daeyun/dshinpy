@@ -130,6 +130,8 @@ def linear(input_tensor: tf_ops.Tensor, n_out: int, name='linear', use_bias=Fals
 
 def fixed_unpool(value, name='unpool', mode='ZERO_FILLED'):
     """
+    Upsampling operation.
+
     :param value: A Tensor of shape [b, d0, d1, ..., dn, ch]
     :param mode:
         ZERO_FILLED: N-dimensional version of the unpooling operation from Dosovitskiy et al.
@@ -155,7 +157,9 @@ def fixed_unpool(value, name='unpool', mode='ZERO_FILLED'):
 
 
 def fixed_pool(value, name='pool'):
-    """Downsampling operation.
+    """
+    Downsampling operation.
+
     :param value: A Tensor of shape [b, d0, d1, ..., dn, ch]
     :return: A Tensor of shape [b, d0/2, d1/2, ..., dn/2, ch]
     """
@@ -174,6 +178,9 @@ def fixed_pool(value, name='pool'):
 
 
 def lrelu(input_tensor: tf.Tensor, alpha=0.05, name='lrelu') -> tf.Tensor:
+    """
+    Leaky ReLU.
+    """
     with tf.variable_scope(name):
         return tf.maximum(alpha * input_tensor, input_tensor, name=name)
 
@@ -241,17 +248,19 @@ def ema_with_update_dependencies(values, initial_values=0.0, decay=0.99, name='e
 
 def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=0.02, ema_decay=0.99, return_mean_var=False, is_trainable=True):
     """
-    is_local: tf.Tensor of type tf.bool. Indicates whether the output tensor should use local stats or
-    moving averages. It is not related to updating the shadow variables.
-    For updating, use the following idiom from TensorFlow documentation:
+    Batch normalization layer.
 
-    ```python
-    # Create an op that will update the moving averages after each training step.
-    with tf.variable_scope('train'):
-        minimize = optimizer.minimize(loss, name='minimize')
-        with tf.control_dependencies([minimize_op]):
-            train_step = tf.group(*update_ops, name='step')
-    ```
+    For updating the EMA variables, use the following idiom from TensorFlow documentation:
+
+    ::
+        # Create an op that will update the moving averages after each training step.
+        with tf.variable_scope('train'):
+            minimize = optimizer.minimize(loss, name='minimize')
+            with tf.control_dependencies([minimize_op]):
+                train_step = tf.group(*update_ops, name='step')
+
+    :param is_local: A Tensor of type tf.bool or a boolean constant. Indicates whether the output tensor should use
+    local stats or moving averages. It is not related to updating the shadow variables.
     """
     assert type(is_trainable) == bool
     assert (isinstance(is_local, tf.Tensor) and is_local.dtype == tf.bool) or isinstance(is_local, bool)
@@ -291,6 +300,8 @@ def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=0.02, ema_deca
 
 def flatten(value, name='flatten'):
     """
+    Flattens the input tensor's shape to be linear.
+
     :param value: A Tensor of shape [b, d0, d1, ...]
     :return: A Tensor of shape [b, d0*d1*...]
     """
@@ -318,6 +329,9 @@ def conv_reshape(value, k, num_channels=None, name='conv_reshape', dims=2):
 
 
 def stack_batch_dim(value_list, name='batch_stack'):
+    """
+    Concatenates Tensors in the batch dimension.
+    """
     assert isinstance(value_list, list)
     sh = value_list[0].get_shape().as_list()
     for xi in value_list:
@@ -333,6 +347,9 @@ def stack_batch_dim(value_list, name='batch_stack'):
 
 
 def apply_concat(value_list, factory, name_prefix='branch') -> tf.Tensor:
+    """
+    Concatenates Tensors in the channel dimension.
+    """
     assert isinstance(value_list, list)
     assert callable(factory)
     branches = []
@@ -348,7 +365,8 @@ def apply_concat(value_list, factory, name_prefix='branch') -> tf.Tensor:
 
 
 def residual_unit(x, is_training, n_out=None, name='rn', mode='SAME', is_first=False):
-    """Uses identity shortcut if nout is None.
+    """
+    Uses identity shortcut if `n_out` is None.
     """
     assert mode in ['DOWNSAMPLE', 'UPSAMPLE', 'SAME']
 
