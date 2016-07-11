@@ -72,6 +72,56 @@ def match_names(values: nn.types.NamedSeq, pattern: str = None,
 class NNModel(metaclass=abc.ABCMeta):
     """
     TensorFlow neural net container.
+
+    Implementation example:
+
+    >>> class SampleNet(NNModel):
+    ...     def _model(self):
+    ...         input_placeholder = self['input']
+    ...         target_placeholder = self['target']
+    ... 
+    ...         out = nn.ops.conv2d(input_placeholder, n_out=1, use_bias=False)
+    ...         out = nn.ops.batch_norm(out, is_trainable=True, is_local=True)
+    ...         self._loss = tf.reduce_mean((out - target_placeholder) ** 2, name='loss')
+    ... 
+    ...     def _minimize_op(self):
+    ...         lr_placeholder = self['learning_rate']
+    ...         return tf.train.AdamOptimizer(lr_placeholder).minimize(self._loss)
+    ... 
+    ...     def _placeholders(self):
+    ...         return [
+    ...             tf.placeholder(tf.float32, shape=[None, 5, 5, 1], name='input'),
+    ...             tf.placeholder(tf.float32, shape=[None, 5, 5, 1], name='target'),
+    ...         ]
+
+    Training example:
+
+    >>> import numpy as np
+    >>> net = SampleNet(seed=42)
+    >>> np.random.seed(42)
+    >>> feed_dict = {'input': np.random.randn(2, 5, 5, 1),
+    ...              'target': np.random.randn(2, 5, 5, 1),
+    ...              'learning_rate': 0.001}
+    >>> net.eval(['loss'], feed_dict)
+    {'loss': 0.75191176}
+    >>> net.train(feed_dict)
+    >>> net.eval(['loss'], feed_dict)
+    {'loss': 0.75166702}
+    >>> net.eval(['loss'], feed_dict)
+    {'loss': 0.75166702}
+
+    Save and restore:
+
+    >>> net.save('/tmp/sample_net/saved')
+    >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
+    >>> net_restored.eval(['loss'], feed_dict)
+    {'loss': 0.75166702}
+    >>> net.train(feed_dict)
+    >>> net_restored.train(feed_dict)
+    >>> net_restored.eval(['loss'], feed_dict)
+    {'loss': 0.75143379}
+    >>> net.eval(['loss'], feed_dict)
+    {'loss': 0.75143379}
     """
 
     _placeholder_prefix = 'placeholder'
@@ -285,13 +335,10 @@ class NNModel(metaclass=abc.ABCMeta):
         fetches = [self[pattern] for pattern in tensors_or_patterns]
         if is_training:
             assert (self['learning_rate'].name in names,
-                    'is_training is True. learning_rate should be in feed_dict')
+                    'learning_rate should be in feed_dict when is_training is True.')
 
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
-        else:
-            assert (self['learning_rate'].name not in names,
-                    'is_training is False. learning_rate should not be in feed_dict')
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
