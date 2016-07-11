@@ -61,7 +61,7 @@ def match_names(values: nn.types.NamedSeq, pattern: str = None,
     if suffix is None:
         suffix = r'.*?'
 
-    final_pattern = prefix + pattern + suffix
+    final_pattern = ''.join([prefix, pattern, suffix])
     matched = []
     for item in values:
         if re.match(final_pattern, item.name):
@@ -75,6 +75,7 @@ class NNModel(metaclass=abc.ABCMeta):
     """
 
     _placeholder_prefix = 'placeholder'
+    _meta_graph_suffix = '.meta'
     _cached = functools.lru_cache(maxsize=2048, typed=True)
 
     @classmethod
@@ -134,7 +135,11 @@ class NNModel(metaclass=abc.ABCMeta):
                         # Accessed by self['train/step$']
                         tf.group(*update_ops, name='step')
 
-                self.saver = tf.train.Saver(name='saver')
+                self.saver = tf.train.Saver(
+                    name='saver',
+                    max_to_keep=10,
+                    keep_checkpoint_every_n_hours=0.5,
+                )
 
             self.initialize()
 
@@ -211,6 +216,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         with self.graph.as_default():
             with self.session.as_default():
+                self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
                 self.saver.restore(tf.get_default_session(), restore_path)
                 log.info("Restored model from %s", restore_path)
                 self.needs_initialization = False
@@ -222,18 +228,18 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param save_path: Path to the checkpoint file.
         """
-        session = tf.get_default_session()
+        save_path = path.expanduser(save_path)
 
-        with session.as_default():
-            save_path = path.expanduser(save_path)
+        assert not path.isdir(save_path) and not save_path.endswith('/'), 'save_path must be a file: {}'.format(save_path)
 
-            dirpath = path.dirname(save_path)
-            if not path.isdir(dirpath):
-                log.info('mkdir %s', dirpath)
-                os.makedirs(dirpath)
+        dirpath = path.dirname(save_path)
+        if not path.isdir(dirpath):
+            log.info('mkdir %s', dirpath)
+            os.makedirs(dirpath)
 
-            # TODO(daeyun): Save graph def.
-            save_path_out = self.saver.save(session, save_path, write_meta_graph=True)
+        with self.graph.as_default():
+            self.saver.export_meta_graph(save_path + self._meta_graph_suffix, as_text=True)
+            save_path_out = self.saver.save(self.session, save_path, write_meta_graph=False)
             log.info("Model saved to file: %s" % save_path_out)
 
     @ensure.ensure_annotations
@@ -386,8 +392,8 @@ class NNModel(metaclass=abc.ABCMeta):
                 assert not pattern.endswith(r':0$')
                 return self.get(pattern + r':0$', prefix=prefix, suffix='')
             except Exception as ex:
-                raise ValueError('len(matched) = {}\npattern: {}\nmatched:\n{}'.format(
-                    len(matched), prefix + pattern + suffix, '\n'.join([item.name for item in matched])))
+                raise ValueError('len(matched) = {}\npattern: {} {} {}\nmatched:\n{}'.format(
+                    len(matched), prefix, pattern, suffix, '\n'.join([item.name for item in matched])))
         return matched[0]
 
     @_cached
