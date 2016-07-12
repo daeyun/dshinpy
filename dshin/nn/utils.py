@@ -102,26 +102,26 @@ class NNModel(metaclass=abc.ABCMeta):
     >>> feed_dict = {'input': np.random.randn(2, 5, 5, 1),
     ...              'target': np.random.randn(2, 5, 5, 1),
     ...              'learning_rate': 0.001}
-    >>> net.eval(['loss'], feed_dict)
-    {'loss': 0.75191176}
+    >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
+    0.75191
     >>> net.train(feed_dict)
-    >>> net.eval(['loss'], feed_dict)
-    {'loss': 0.75166702}
-    >>> net.eval(['loss'], feed_dict)
-    {'loss': 0.75166702}
+    >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
+    0.75167
+    >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
+    0.75167
 
     Save and restore:
 
     >>> net.save('/tmp/sample_net/saved')
     >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
-    >>> net_restored.eval(['loss'], feed_dict)
-    {'loss': 0.75166702}
+    >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
+    0.75167
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
-    >>> net_restored.eval(['loss'], feed_dict)
-    {'loss': 0.75143379}
-    >>> net.eval(['loss'], feed_dict)
-    {'loss': 0.75143379}
+    >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
+    0.75143
+    >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
+    0.75143
     """
 
     _placeholder_prefix = 'placeholder'
