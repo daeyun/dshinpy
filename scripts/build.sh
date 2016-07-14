@@ -64,5 +64,5 @@ source activate dshinpy
 
 conda install --file conda_requirements.txt
 
-yes | pip install -r requirements.txt
+yes | pip install --upgrade -r requirements.txt
 
