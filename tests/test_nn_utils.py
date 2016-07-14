@@ -90,22 +90,21 @@ def test_save_and_restore(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, dat
     def loss():
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
 
-    for _ in range(2):
-        save()
-        saved_loss = loss()
+    save()
+    saved_loss = loss()
 
-        train()
-        after_train = loss()
+    train()
+    after_train = loss()
 
-        restore()
-        after_restore = loss()
+    restore()
+    after_restore = loss()
 
-        train()
-        after_restore_and_train = loss()
+    train()
+    after_restore_and_train = loss()
 
-        assert saved_loss == after_restore
-        assert after_train == after_restore_and_train
-        assert after_restore > after_restore_and_train
+    assert saved_loss == after_restore
+    assert after_train == after_restore_and_train
+    assert after_restore > after_restore_and_train
 
 
 def test_save_and_restore_from_scratch(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
