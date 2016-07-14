@@ -13,4 +13,6 @@ set -xe
 
 cd $DIR/../
 
+source activate dshinpy
+
 py.test
