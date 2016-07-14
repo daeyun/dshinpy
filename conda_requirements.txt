@@ -1,0 +1,10 @@
+matplotlib
+mkl
+numpy
+pip
+setuptools
+six
+sqlite
+wheel
+zlib
+scipy
