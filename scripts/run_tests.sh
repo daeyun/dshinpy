@@ -20,4 +20,15 @@ hash -r
 
 source activate dshinpy
 
+LIBC_DIR="$HOME/libc_env/"
+
+if [ -d ${LIBC_DIR} ]; then
+
+LD_LIBRARY_PATH="$LIBC_DIR/lib/x86_64-linux-gnu/:$LIBC_DIR/usr/lib64/:$LD_LIBRARY_PATH" \
+  $LIBC_DIR/lib/x86_64-linux-gnu/ld-2.17.so $(which python) $(which py.test)
+
+else
+
 py.test
+
+fi
