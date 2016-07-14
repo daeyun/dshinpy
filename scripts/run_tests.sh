@@ -13,6 +13,11 @@ set -xe
 
 cd $DIR/../
 
+
+MINICONDA="$HOME/miniconda"
+export PATH="${MINICONDA}/bin:$PATH"
+hash -r
+
 source activate dshinpy
 
 py.test
