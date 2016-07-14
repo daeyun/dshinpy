@@ -5,4 +5,6 @@ ensure >= 0.6.2
 toposort >= 1.4
 pytest >= 2.9.2
 
+psutil
+
 http://ci.tensorflow.org/view/Nightly/job/nightly-python35-linux-cpu/lastSuccessfulBuild/artifact/pip_test/whl/tensorflow-0.9.0-cp35-cp35m-linux_x86_64.whl
