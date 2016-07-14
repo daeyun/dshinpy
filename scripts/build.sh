@@ -47,6 +47,27 @@ if [ ! -d ${MINICONDA} ]; then
     trap "rm -rf ${MINICONDA_SH}" EXIT
 fi
 
+command_exists () {
+    type "$1" &> /dev/null ;
+}
+
+LIBC_DIR="$HOME/libc_env/"
+
+
+# EWS only. libc is outdated.
+if [ ! -d ${LIBC_DIR} ]; then
+if command_exists rpm2cpio ; then
+    mkdir $LIBC_DIR
+    cd $LIBC_DIR
+    wget http://launchpadlibrarian.net/137699828/libc6_2.17-0ubuntu5_amd64.deb
+    wget http://launchpadlibrarian.net/137699829/libc6-dev_2.17-0ubuntu5_amd64.deb
+    wget ftp://rpmfind.net/linux/sourceforge/m/ma/magicspecs/apt/3.0/x86_64/RPMS.lib/libstdc++-4.8.2-7mgc30.x86_64.rpm
+    ar p libc6_2.17-0ubuntu5_amd64.deb data.tar.gz | tar zx
+    ar p libc6-dev_2.17-0ubuntu5_amd64.deb data.tar.gz | tar zx
+    rpm2cpio libstdc++-4.8.2-7mgc30.x86_64.rpm| cpio -idmv
+fi
+fi
+
 
 # http://conda.pydata.org/docs/travis.html
 export PATH="${MINICONDA}/bin:$PATH"
