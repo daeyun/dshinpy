@@ -83,7 +83,7 @@ conda create -q -n dshinpy python=$PYTHON_VERSION || true
 
 source activate dshinpy
 
-conda install --file conda_requirements.txt
+conda install -q --file conda_requirements.txt
 
 yes | pip install -r requirements.txt
 
