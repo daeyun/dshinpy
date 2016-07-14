@@ -18,10 +18,6 @@ PROJ_DIR=${DIR}/../
 set -ex
 
 
-if [ -d ${MINICONDA} ]; then
-rm -r ${MINICONDA}
-fi
-
 if [ ! -d ${MINICONDA} ]; then
     if [[ "$PYTHON_VERSION" == 2* ]]; then
         WGET_MINICONDA="https://repo.continuum.io/miniconda/Miniconda2-latest-"
