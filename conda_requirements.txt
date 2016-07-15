@@ -8,3 +8,4 @@ sqlite
 wheel
 zlib
 scipy
+psutil

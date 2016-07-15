@@ -131,12 +131,12 @@ class NNModel(metaclass=abc.ABCMeta):
     @classmethod
     def from_file(cls, restore_path: str):
         """
-        A factory method that restores a previously saved model.
+        A factory method that returns an instance of a previously saved model.
 
         :param restore_path: The path used to save the model.
         :return: NNModel instance.
         """
-        net = cls(build=False)
+        net = RestoredNNModel(build=False)
         net.restore(restore_path=restore_path)
         return net
 
@@ -474,3 +474,18 @@ class NNModel(metaclass=abc.ABCMeta):
         values = self.sorted_values(pattern=pattern)
         assert len(values) > 0
         return values[-1]
+
+
+class RestoredNNModel(NNModel):
+    """
+    Container for models restored from file. This can only be instantiated from `NNModel.from_file`.
+    """
+    def _model(self):
+        # Restored models should not try to build a new graph.
+        raise NotImplementedError()
+
+    def _minimize_op(self):
+        raise NotImplementedError()
+
+    def _placeholders(self):
+        raise NotImplementedError()
