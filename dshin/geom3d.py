@@ -215,10 +215,10 @@ def plot_mesh(mesh, ax=None):
     bmax += padding
     bmin -= padding
 
-    # ax.set_xlim(bmin[0], bmax[0])
-    # ax.set_ylim(bmin[1], bmax[1])
-    # ax.set_zlim(bmin[2], bmax[2])
-    # ax.set_aspect('equal')
+    ax.set_xlim(bmin[0], bmax[0])
+    ax.set_ylim(bmin[1], bmax[1])
+    ax.set_zlim(bmin[2], bmax[2])
+    ax.set_aspect('equal')
 
     return ax
 

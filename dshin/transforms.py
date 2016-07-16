@@ -350,8 +350,8 @@ def random_rotation(is_homogeneous=False):
 def xyz_to_sph(xyz):
     """
     :return: radius, inclination, azimuth. In radians.
-    0 <= inclination <= 180
-    -180 < azimuth <= 180
+    0 <= inclination <= pi
+    -pi < azimuth <= pi
     """
     r = la.norm(xyz, ord=2, axis=-1, keepdims=True).reshape(-1, 1)
     assert (r != 0).all()

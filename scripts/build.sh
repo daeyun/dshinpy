@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-PYTHON_VERSION=3.5
+PYTHON_VERSION=3.4
 MINICONDA="$HOME/miniconda"
 
 ### 
