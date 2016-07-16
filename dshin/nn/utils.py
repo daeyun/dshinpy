@@ -13,11 +13,12 @@ import tensorflow as tf
 import toposort
 
 from dshin import log
-from dshin import nn
+from dshin.nn import types as nn_types
+from dshin.nn import ops as nn_ops
 
 
 @ensure.ensure_annotations
-def sort_tensors(ops: nn.types.Operations) -> typing.Sequence[str]:
+def sort_tensors(ops: nn_types.Operations) -> typing.Sequence[str]:
     """
     Sorts the inputs and outputs of TensorFlow Operations in topological order.
 
@@ -43,8 +44,8 @@ def sort_tensors(ops: nn.types.Operations) -> typing.Sequence[str]:
     return out
 
 
-def match_names(values: nn.types.NamedSeq, pattern: str = None,
-                prefix: str = None, suffix: str = None) -> nn.types.NamedSeq:
+def match_names(values: nn_types.NamedSeq, pattern: str = None,
+                prefix: str = None, suffix: str = None) -> nn_types.NamedSeq:
     """
     Filters TensorFlow graph objects by regular expression.
 
@@ -80,8 +81,8 @@ class NNModel(metaclass=abc.ABCMeta):
     ...         input_placeholder = self['input']
     ...         target_placeholder = self['target']
     ... 
-    ...         out = nn.ops.conv2d(input_placeholder, n_out=1, use_bias=False)
-    ...         out = nn.ops.batch_norm(out, is_trainable=True, is_local=True)
+    ...         out = nn_ops.conv2d(input_placeholder, n_out=1, use_bias=False)
+    ...         out = nn_ops.batch_norm(out, is_trainable=True, is_local=True)
     ...         self._loss = tf.reduce_mean((out - target_placeholder) ** 2, name='loss')
     ... 
     ...     def _minimize_op(self):
@@ -218,7 +219,7 @@ class NNModel(metaclass=abc.ABCMeta):
         ]
 
     @abc.abstractmethod
-    def _placeholders(self) -> nn.types.Tensors:
+    def _placeholders(self) -> nn_types.Tensors:
         """
         Placeholders defined by the user.
         Side effect: Populates self.graph.
@@ -349,7 +350,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 results[name] = result
         return results
 
-    def __getitem__(self, pattern: str) -> nn.types.Value:
+    def __getitem__(self, pattern: str) -> nn_types.Value:
         """
         Same as `get`. Returns a Variable or Tensor whose name uniquely matches the pattern.
         :param pattern: A regular expression pattern.
@@ -358,7 +359,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.get(pattern)
 
     @property
-    def variables(self) -> nn.types.Variables:
+    def variables(self) -> nn_types.Variables:
         """
         Returns all TensorFlow Variables defined in the graph.
 
@@ -367,7 +368,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.graph.get_collection(tf.GraphKeys.VARIABLES)
 
     @property
-    def tensors(self) -> nn.types.Tensors:
+    def tensors(self) -> nn_types.Tensors:
         """
         Returns the output values of TensorFlow Operations defined in the graph.
 
@@ -379,7 +380,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return out
 
     @property
-    def ops(self) -> nn.types.Operations:
+    def ops(self) -> nn_types.Operations:
         """
         Returns all TensorFlow Operations in the graph that do not have an output value.
 
@@ -392,7 +393,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return out
 
     @property
-    def all_values(self) -> nn.types.Values:
+    def all_values(self) -> nn_types.Values:
         """
         Returns all TensorFlow Variables or Operations defined in the graph.
 
@@ -415,7 +416,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return len(match_names(self.all_values, pattern))
 
     @_cached
-    def collection(self, collection: str) -> nn.types.Values:
+    def collection(self, collection: str) -> nn_types.Values:
         """
         Retrieves values by a collection key.
 
@@ -426,7 +427,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.graph.get_collection(collection)
 
     @_cached
-    def get(self, pattern: str, prefix=None, suffix=None) -> nn.types.Value:
+    def get(self, pattern: str, prefix=None, suffix=None) -> nn_types.Value:
         """
         Returns a variable or tensor whose name uniquely matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
@@ -448,7 +449,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return matched[0]
 
     @_cached
-    def sorted_values(self, pattern=None) -> nn.types.Tensors:
+    def sorted_values(self, pattern=None) -> nn_types.Tensors:
         """
         Topologically sorted Tensors.
 
