@@ -61,8 +61,8 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         pt.gcf().colorbar(p)
 
     if lim is None:
-        bmax = (pts.max(axis=0).max(axis=0))
-        bmin = (pts.min(axis=0).min(axis=0))
+        bmax = (pts.max(axis=0))
+        bmin = (pts.min(axis=0))
 
         padding = np.abs((bmax - bmin) / 2.0).max()
         bmin = (bmax + bmin) / 2.0 - padding
