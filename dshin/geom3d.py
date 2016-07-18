@@ -72,9 +72,9 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         bmax = lim.ravel()[3:6]
 
     if reset_limits:
-        ax.set_xlim([bmin, bmax])
-        ax.set_ylim([bmin, bmax])
-        ax.set_zlim([bmin, bmax])
+        ax.set_xlim([bmin[0], bmax[0]])
+        ax.set_ylim([bmin[1], bmax[1]])
+        ax.set_zlim([bmin[2], bmax[2]])
     ax.set_aspect('equal')
 
     return ax
