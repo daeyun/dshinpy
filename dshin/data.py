@@ -40,12 +40,12 @@ class AsyncArrayLoader(object):
         self._executor = concurrent.futures.ThreadPoolExecutor(self._pool_size)
 
     def __del__(self):
-        self._executor.shutdown(wait=False)
         self._process_pool.close()
+        self._executor.shutdown(wait=False)
 
     def shutdown(self):
-        self._executor.shutdown(wait=False)
         self._process_pool.terminate()
+        self._executor.shutdown(wait=False)
 
     @ensure.ensure_annotations
     def join_arrays(self, filenames: typing.Sequence[str]) -> np.ndarray:
