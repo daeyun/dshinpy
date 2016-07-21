@@ -37,7 +37,15 @@ class AsyncArrayLoader(object):
         self._pool_size = pool_size
         self._loader_func = loader_func
         self._process_pool = mp.Pool(self._pool_size)
-        self._thread_pool = concurrent.futures.ThreadPoolExecutor(self._pool_size)
+        self._executor = concurrent.futures.ThreadPoolExecutor(self._pool_size)
+
+    def __del__(self):
+        self._executor.shutdown(wait=False)
+        self._process_pool.close()
+
+    def shutdown(self):
+        self._executor.shutdown(wait=False)
+        self._process_pool.terminate()
 
     @ensure.ensure_annotations
     def join_arrays(self, filenames: typing.Sequence[str]) -> np.ndarray:
@@ -60,7 +68,7 @@ class AsyncArrayLoader(object):
         :return: A Future object returning an array of shape (n, ...) where n = len(filenames).
         """
         assert path.isfile(filenames[0])
-        return self._thread_pool.submit(self.join_arrays, filenames)
+        return self._executor.submit(self.join_arrays, filenames)
 
 
 class QueryPaginator(object):
