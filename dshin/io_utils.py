@@ -4,6 +4,7 @@ import os
 import numpy as np
 import hashlib
 
+
 def read_mesh(filename):
     """
     :param filename: full path to mesh file.
@@ -15,6 +16,7 @@ def read_mesh(filename):
         return read_off(filename)
     if filename.endswith('.ply'):
         return read_ply(filename)
+
 
 def read_off(filename):
     filename = path.expanduser(filename)
@@ -30,9 +32,9 @@ def read_off(filename):
     vertices = np.fromstring(' '.join(lines[1:num_vertices + 1]),
                              dtype=np.float64, sep=' ').reshape((-1, 3))
     faces = np.fromstring(
-            ' '.join(lines[num_vertices + 1:num_vertices + num_faces + 1]),
-            dtype=np.uint32,
-            sep=' ').reshape((-1, 4))
+        ' '.join(lines[num_vertices + 1:num_vertices + num_faces + 1]),
+        dtype=np.uint32,
+        sep=' ').reshape((-1, 4))
 
     assert len(lines) == num_vertices + num_faces + 1
     assert (faces[:, 0] == 3).all(), "all triangle faces"
@@ -54,6 +56,7 @@ def read_off(filename):
         'f': faces,
     }
 
+
 def read_ply(filename):
     from plyfile import PlyData
     plydata = PlyData.read(filename)
@@ -66,6 +69,7 @@ def read_ply(filename):
         'f': f,
     }
 
+
 def save_off(mesh, filename):
     verts = mesh['v'].astype(np.float32)
     faces = mesh['f'].astype(np.int32)
@@ -74,10 +78,11 @@ def save_off(mesh, filename):
 
     with open(path.expanduser(filename), 'ab') as fp:
         fp.write('OFF\n{} {} 0\n'.format(
-                verts.shape[0], faces.shape[0]).encode('utf-8'))
+            verts.shape[0], faces.shape[0]).encode('utf-8'))
         np.savetxt(fp, verts, fmt='%.5f')
         np.savetxt(fp, np.hstack((3 * np.ones((
             faces.shape[0], 1)), faces)), fmt='%d')
+
 
 def sha1(objs):
     assert isinstance(objs, list), isinstance(objs, tuple)
@@ -85,3 +90,17 @@ def sha1(objs):
     for obj in objs:
         sha1.update(str(obj).encode('utf8'))
     return sha1.hexdigest()
+
+
+def sha256(objs):
+    assert isinstance(objs, list), isinstance(objs, tuple)
+    h = hashlib.sha256()
+    for obj in objs:
+        h.update(str(obj).encode('utf8'))
+    return h.hexdigest()
+
+
+def stringify_float_arrays(arr_list, precision=6):
+    assert isinstance(arr_list, list), isinstance(arr_list, tuple)
+    arr = np.hstack(arr_list).ravel().astype(np.float32)
+    return np.array_str(arr, precision=precision, max_line_width=np.iinfo(np.int64).max)
