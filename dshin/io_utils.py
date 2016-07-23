@@ -18,9 +18,20 @@ def read_mesh(filename):
         return read_ply(filename)
 
 
+def read_off_num_fv(filename: str) -> tuple:
+    filename = path.expanduser(filename)
+    with open(filename, 'r') as f:
+        first_two_lines = [f.readline(), f.readline()]
+    tokens = ' '.join([item.strip() for item in first_two_lines]).split()
+    assert tokens[0].upper() == 'OFF'
+    num_vertices = int(tokens[1])
+    num_faces = int(tokens[2])
+    return num_faces, num_vertices
+
+
 def read_off(filename):
     filename = path.expanduser(filename)
-    with open(filename) as f:
+    with open(filename, 'r') as f:
         content = f.read()
 
     assert content[:3].upper() == 'OFF'
