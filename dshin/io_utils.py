@@ -22,14 +22,29 @@ def read_off_num_fv(filename: str) -> tuple:
     filename = path.expanduser(filename)
     with open(filename, 'r') as f:
         first_two_lines = [f.readline(), f.readline()]
-    tokens = ' '.join([item.strip() for item in first_two_lines]).split()
-    assert tokens[0].upper() == 'OFF'
-    num_vertices = int(tokens[1])
-    num_faces = int(tokens[2])
+    assert first_two_lines[0][:3] == 'OFF'
+
+    tokens = ' '.join([item.strip() for item in [
+        first_two_lines[0][3:],
+        first_two_lines[1]
+    ]]).split()
+
+    num_vertices = int(tokens[0])
+    num_faces = int(tokens[1])
+
+    # TODO(daeyun): Make this a warning.
+    # OK to fail.
+    assert int(tokens[2]) == 0
+
     return num_faces, num_vertices
 
 
 def read_off(filename):
+    """
+    Read OFF mesh files.
+
+    File content must start with "OFF". Not always followed by a whitespace.
+    """
     filename = path.expanduser(filename)
     with open(filename, 'r') as f:
         content = f.read()
