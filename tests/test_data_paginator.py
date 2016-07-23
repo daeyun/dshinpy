@@ -93,3 +93,4 @@ def test_paginator_next_three(query):
     assert len(result) == 2
     assert result[0]['username'] == 'first'
     assert result[1]['username'] == 'second'
+
