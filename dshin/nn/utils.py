@@ -201,6 +201,11 @@ class NNModel(metaclass=abc.ABCMeta):
             self._model()
 
             with tf.variable_scope('train'):
+                with tf.device('/cpu:0'):
+                    # Accessed by self['train/global_step$']
+                    global_step = tf.get_variable('global_step', (), initializer=tf.constant_initializer(0), dtype=tf.int64, trainable=False)
+                    tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, global_step.assign_add(1))
+
                 minimize_op = self._minimize_op()
                 assert isinstance(minimize_op, tf.Operation)
 
@@ -369,12 +374,12 @@ class NNModel(metaclass=abc.ABCMeta):
             out_eval = self.session.run(fetches, new_feed_dict)
 
         # Assumes summary op was the last item in `fetches`.
-        # TODO(daeyun): add global step.
         if save_summary and self._summary_ops:
+            global_step = tf.train.global_step(self.session, self['train/global_step'])
             if is_training:
-                self._train_summary_writer.add_summary(out_eval[-1])
+                self._train_summary_writer.add_summary(out_eval[-1], global_step)
             else:
-                self._test_summary_writer.add_summary(out_eval[-1])
+                self._test_summary_writer.add_summary(out_eval[-1], global_step)
 
         results = {}
         for name, result in zip(tensors_or_patterns, out_eval):
