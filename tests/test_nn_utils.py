@@ -125,7 +125,7 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
     assert path.isdir(str(tmpdir.join('summary')))
     assert path.isdir(str(tmpdir.join('summary/train')))
     assert not path.isdir(str(tmpdir.join('summary2')))
-    save(bn_net))
+    save(bn_net)
     train(bn_net)
     bn_net = restore()
     loss(bn_net)
