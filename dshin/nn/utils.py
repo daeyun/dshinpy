@@ -294,8 +294,8 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
                 self.saver.restore(tf.get_default_session(), restore_path)
                 log.info("Restored model from %s", restore_path)
-                self._init_summaries()
                 self.needs_initialization = False
+                self._init_summaries()
 
     @ensure.ensure_annotations
     def save(self, save_path: str):
