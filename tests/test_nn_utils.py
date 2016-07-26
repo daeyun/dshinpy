@@ -107,14 +107,14 @@ def test_save_and_restore(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, dat
     assert after_restore > after_restore_and_train
 
 
-def test_save_and_restore_from_scratch(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
+def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
     out_path = str(tmpdir.join('filename'))
 
     def save(bn_net):
         bn_net.save(out_path)
 
-    def restore():
-        return BNOnly.from_file(out_path)
+    def restore(summary_dir=str(tmpdir.join('summary')):
+        return BNOnly.from_file(out_path, summary_dir=summary_dir))
 
     def train(bn_net):
         bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001})
@@ -122,22 +122,21 @@ def test_save_and_restore_from_scratch(bn_net: nn.utils.NNModel, tmpdir: local.L
     def loss(bn_net):
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
 
-    for _ in range(2):
-        save(bn_net)
-        saved_loss = loss(bn_net)
+    assert path.isdir(str(tmpdir.join('summary'))
+    assert path.isdir(str(tmpdir.join('summary/train'))
+    assert not path.isdir(str(tmpdir.join('summary2'))
+    save(bn_net))
+    train(bn_net)
+    bn_net = restore()
+    loss(bn_net)
+    train(bn_net)
 
-        train(bn_net)
-        after_train = loss(bn_net)
+    bn_net = restore(str(tmpdir.join('summary2'))
+    assert path.isdir(str(tmpdir.join('summary2'))
+    assert path.isdir(str(tmpdir.join('summary2/train'))
 
-        bn_net = restore()
-        after_restore = loss(bn_net)
-
-        train(bn_net)
-        after_restore_and_train = loss(bn_net)
-
-        assert saved_loss == after_restore
-        assert after_train == after_restore_and_train
-        assert after_restore > after_restore_and_train
+    train(bn_net)
+    loss(bn_net)
 
 
 def test_save_and_restore_global_step(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
