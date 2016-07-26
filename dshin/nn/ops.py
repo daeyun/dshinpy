@@ -15,7 +15,7 @@ gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
 
 
 def _variable_on_cpu(name, shape, initializer, trainable=True):
-    with tf.device('/gpu:0'):
+    with tf.device('/cpu:0'):
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
         return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
 
