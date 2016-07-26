@@ -114,7 +114,7 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
         bn_net.save(out_path)
 
     def restore(summary_dir=str(tmpdir.join('summary'))):
-        return BNOnly.from_file(out_path, summary_dir=summary_dir))
+        return BNOnly.from_file(out_path, summary_dir=summary_dir)
 
     def train(bn_net):
         bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001})
