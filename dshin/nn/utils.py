@@ -173,18 +173,20 @@ class NNModel(metaclass=abc.ABCMeta):
                 # Graph-level random seed.
                 tf.set_random_seed(self.seed)
 
+        self._summary_ops = None
+
         if build:
-            self._build_model()
-            self._init_summaries()
+            self._build_model()  # Also initializes variables.
+            self._init_summaries()  # Sets self._summary_ops
 
     def _init_summaries(self):
+        assert not self.needs_initialization
+        assert self._summary_ops is None
         if self.summary_dir:
             self._summary_ops = tf.merge_all_summaries()
             # Graph is only added to 'train' summary file.
             self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
             self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
-        else:
-            self._summary_ops = None
 
     def _build_model(self):
         """
