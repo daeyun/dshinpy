@@ -375,7 +375,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         # Assumes summary op was the last item in `fetches`.
         if save_summary and self._summary_ops:
-            global_step = tf.train.global_step(self.session, self['train/global_step'])
+            global_step = self.global_step()
             if is_training:
                 self._train_summary_writer.add_summary(out_eval[-1], global_step)
             else:
@@ -512,6 +512,14 @@ class NNModel(metaclass=abc.ABCMeta):
         values = self.sorted_values(pattern=pattern)
         assert len(values) > 0
         return values[-1]
+
+    def global_step(self) -> int:
+        """
+        Returns the global training step.
+
+        :return: The global step value.
+        """
+        return tf.train.global_step(self.session, self['train/global_step'])
 
 
 class RestoredNNModel(NNModel):
