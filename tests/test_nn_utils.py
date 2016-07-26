@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import tensorflow as tf
+from os import path
 from py._path import local
 
 from dshin import nn
