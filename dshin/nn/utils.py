@@ -130,18 +130,18 @@ class NNModel(metaclass=abc.ABCMeta):
     _cached = functools.lru_cache(maxsize=2048, typed=True)
 
     @classmethod
-    def from_file(cls, restore_path: str):
+    def from_file(cls, restore_path: str, summary_dir: str = None):
         """
         A factory method that returns an instance of a previously saved model.
 
         :param restore_path: The path used to save the model.
         :return: NNModel instance.
         """
-        net = RestoredNNModel(build=False)
+        net = RestoredNNModel(build=False, summary_dir=summary_dir)
         net.restore(restore_path=restore_path)
         return net
 
-    def __init__(self, sess: tf.Session = None, seed: int = None, build=True):
+    def __init__(self, sess: tf.Session = None, seed: int = None, build=True, summary_dir: str = None):
         """
         Creates a new model instance.
 
@@ -159,6 +159,14 @@ class NNModel(metaclass=abc.ABCMeta):
 
         self.seed = seed
         self.needs_initialization = True
+        if summary_dir:
+            self.summary_dir = path.expanduser(summary_dir)
+            if not path.isdir(self.summary_dir):
+                os.makedirs(self.summary_dir)
+                log.info('Created directory: %s', self.summary_dir)
+            assert path.isdir(self.summary_dir)
+        else:
+            self.summary_dir = None
 
         if self.seed is not None:
             with self.graph.as_default():
@@ -167,6 +175,16 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if build:
             self._build_model()
+            self._init_summaries()
+
+    def _init_summaries(self):
+        if self.summary_dir:
+            self._summary_ops = tf.merge_all_summaries()
+            # Graph is only added to 'train' summary file.
+            self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
+            self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
+        else:
+            self._summary_ops = None
 
     def _build_model(self):
         """
@@ -274,6 +292,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
                 self.saver.restore(tf.get_default_session(), restore_path)
                 log.info("Restored model from %s", restore_path)
+                self._init_summaries()
                 self.needs_initialization = False
 
     @ensure.ensure_annotations
@@ -308,7 +327,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.eval([], feed_dict=feed_dict, is_training=True)
 
     @ensure.ensure_annotations
-    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, is_training: bool = False) -> dict:
+    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, is_training=False, save_summary=True) -> dict:
         """
         Evaluates TensorFlow Operations.
 
@@ -341,8 +360,19 @@ class NNModel(metaclass=abc.ABCMeta):
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
 
+        if save_summary and self._summary_ops:
+            fetches.append(self._summary_ops)
+
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
+
+        # Assumes summary op was the last item in `fetches`.
+        # TODO(daeyun): add global step.
+        if save_summary and self._summary_ops:
+            if is_training:
+                self._train_summary_writer.add_summary(out_eval[-1])
+            else:
+                self._test_summary_writer.add_summary(out_eval[-1])
 
         results = {}
         for name, result in zip(tensors_or_patterns, out_eval):
@@ -481,6 +511,7 @@ class RestoredNNModel(NNModel):
     """
     Container for models restored from file. This can only be instantiated from `NNModel.from_file`.
     """
+
     def _model(self):
         # Restored models should not try to build a new graph.
         raise NotImplementedError()

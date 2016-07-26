@@ -22,8 +22,8 @@ class BNOnly(nn.utils.NNModel):
 
 
 @pytest.fixture(scope='module')
-def bn_net():
-    return BNOnly(seed=42)
+def bn_net(tmpdir: local.LocalPath):
+    return BNOnly(seed=42, summary_dir=str(tmpdir.join('summary')))
 
 
 @pytest.fixture(scope='module')
@@ -138,3 +138,25 @@ def test_save_and_restore_from_scratch(bn_net: nn.utils.NNModel, tmpdir: local.L
         assert saved_loss == after_restore
         assert after_train == after_restore_and_train
         assert after_restore > after_restore_and_train
+
+
+def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
+    out_path = str(tmpdir.join('filename'))
+
+    def save(bn_net):
+        bn_net.save(out_path)
+
+    def restore():
+        return BNOnly.from_file(out_path, summary_dir=str(tmpdir.join('summary')))
+
+    def train(bn_net):
+        bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001})
+
+    def loss(bn_net):
+        return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
+
+    save(bn_net)
+    train(bn_net)
+    bn_net = restore()
+    train(bn_net)
+    loss(bn_net)

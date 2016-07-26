@@ -55,7 +55,7 @@ def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padd
         deconv = tf.nn.conv2d_transpose(input_tensor, w, strides=[1, s, s, 1], padding=padding, output_shape=output_shape)  # type: tf.Tensor
 
         if type(output_shape[0]) != int:
-            output_shape[0] = -1
+            output_shape[0] = None
 
         deconv.set_shape(output_shape)
 
