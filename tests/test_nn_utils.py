@@ -21,7 +21,7 @@ class BNOnly(nn.utils.NNModel):
         ]
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope='function')
 def bn_net(tmpdir: local.LocalPath):
     return BNOnly(seed=42, summary_dir=str(tmpdir.join('summary')))
 
