@@ -140,7 +140,7 @@ def test_save_and_restore_from_scratch(bn_net: nn.utils.NNModel, tmpdir: local.L
         assert after_restore > after_restore_and_train
 
 
-def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
+def test_save_and_restore_global_step(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
     out_path = str(tmpdir.join('filename'))
 
     def save(bn_net):
@@ -155,8 +155,20 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
     def loss(bn_net):
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
 
+    assert bn_net.global_step() == 0
+
+    train(bn_net)
+    assert bn_net.global_step() == 1
+
     save(bn_net)
     train(bn_net)
+    assert bn_net.global_step() == 2
+
     bn_net = restore()
+    assert bn_net.global_step() == 1
+
     train(bn_net)
+    assert bn_net.global_step() == 2
+
     loss(bn_net)
+    assert bn_net.global_step() == 2
