@@ -21,8 +21,11 @@ def kill_child_processes():
             else:
                 time.sleep(1)
                 for process in children:
-                    print('Sending SIGKILL to {}'.format(process.pid), file=sys.stderr)
-                    process.send_signal(signal.SIGKILL)
+                    try:
+                        process.send_signal(signal.SIGKILL)
+                        print('Sent SIGKILL to {}'.format(process.pid), file=sys.stderr)
+                    except psutil.NoSuchProcess:
+                        pass
 
         sys.exit()
     except Exception as ex:

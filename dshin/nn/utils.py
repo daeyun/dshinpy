@@ -182,11 +182,12 @@ class NNModel(metaclass=abc.ABCMeta):
     def _init_summaries(self):
         assert not self.needs_initialization
         assert self._summary_ops is None
-        if self.summary_dir:
-            self._summary_ops = tf.merge_all_summaries()
-            # Graph is only added to 'train' summary file.
-            self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
-            self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
+        with self.graph.as_default():
+            if self.summary_dir:
+                self._summary_ops = tf.merge_all_summaries()
+                # Graph is only added to 'train' summary file.
+                self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
+                self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
 
     def _build_model(self):
         """
@@ -367,20 +368,26 @@ class NNModel(metaclass=abc.ABCMeta):
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
 
-        if save_summary and self._summary_ops:
+        summary_op_fetch_index = None
+        if save_summary and self._summary_ops is not None:
+            summary_op_fetch_index = len(fetches)
             fetches.append(self._summary_ops)
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
 
         # Assumes summary op was the last item in `fetches`.
-        if save_summary and self._summary_ops:
+        if summary_op_fetch_index is not None:
             global_step = self.global_step()
+            summary_result = out_eval[summary_op_fetch_index]
+            assert isinstance(summary_result, bytes)
             if is_training:
-                print('Writing summary.', out_eval[-1], global_step)
-                self._train_summary_writer.add_summary(out_eval[-1], global_step)
+                self._train_summary_writer.add_summary(summary_result, global_step)
+                # TODO(daeyun): Listen for a keypress event to signal flush.
+                self._train_summary_writer.flush()
             else:
-                self._test_summary_writer.add_summary(out_eval[-1], global_step)
+                self._test_summary_writer.add_summary(summary_result, global_step)
+                self._test_summary_writer.flush()
 
         results = {}
         for name, result in zip(tensors_or_patterns, out_eval):
