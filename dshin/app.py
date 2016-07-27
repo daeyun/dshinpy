@@ -1,5 +1,6 @@
 import sys
 
+import dshin
 from dshin.third_party import gflags
 
 FLAGS = gflags.FLAGS
@@ -18,10 +19,11 @@ def run(main=None):
         print('non-flag arguments:', argv)
     main = main or sys.modules['__main__'].main
 
-    if main.__code__.co_argcount == 0:
-        status = main()
-    else:
-        status = main(sys.argv)
+    with dshin.os_utils.killpg_on_exit():
+        if main.__code__.co_argcount == 0:
+            status = main()
+        else:
+            status = main(sys.argv)
 
     # Exit code defaults to 0.
     sys.exit(status)
