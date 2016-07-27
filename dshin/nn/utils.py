@@ -324,14 +324,14 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @ensure.ensure_annotations
-    def train(self, feed_dict: dict):
+    def train(self, feed_dict: dict, save_summary=True):
         """
         Runs a training step.
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
         """
-        self.eval([], feed_dict=feed_dict, is_training=True)
+        self.eval([], feed_dict=feed_dict, is_training=True, save_summary=save_summary)
 
     @ensure.ensure_annotations
     def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, is_training=False, save_summary=True) -> dict:

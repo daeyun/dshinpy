@@ -5,6 +5,7 @@ Helpers for querying and loading data.
 import concurrent.futures
 import multiprocessing as mp
 import typing
+import signal
 from os import path
 
 import ensure
@@ -25,6 +26,14 @@ def _load_npz(filename: str, field='data') -> np.ndarray:
     return np.load(filename)[field]
 
 
+def _init_worker():
+    """
+    Ignore SIGINT in multiprocessing pool.
+    :return:
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 class AsyncArrayLoader(object):
     @ensure.ensure_annotations
     def __init__(self, pool_size=16, loader_func: typing.Callable = _load_npz):
@@ -36,7 +45,7 @@ class AsyncArrayLoader(object):
         """
         self._pool_size = pool_size
         self._loader_func = loader_func
-        self._process_pool = mp.Pool(self._pool_size)
+        self._process_pool = mp.Pool(self._pool_size, initializer=_init_worker)
         self._executor = concurrent.futures.ThreadPoolExecutor(self._pool_size)
 
     def __del__(self):
