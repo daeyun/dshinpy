@@ -6,7 +6,7 @@ import atexit
 import contextlib
 
 
-def kill_children_processes():
+def kill_child_processes():
     try:
         pid = os.getpid()
         p = psutil.Process(pid)
@@ -24,7 +24,7 @@ def kill_children_processes():
 @contextlib.contextmanager
 def killpg_on_exit(sig=signal.SIGTERM):
     os.setpgrp()
-    atexit.register(kill_children_processes)
+    atexit.register(kill_child_processes)
     try:
         yield
     except (KeyboardInterrupt, SystemExit):
