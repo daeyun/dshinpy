@@ -1,6 +1,7 @@
 import sys
 
 import dshin
+from dshin import log
 from dshin.third_party import gflags
 
 FLAGS = gflags.FLAGS
@@ -20,6 +21,7 @@ def run(main=None):
     main = main or sys.modules['__main__'].main
 
     with dshin.os_utils.killpg_on_exit():
+        log.info('Starting main() in %s', sys.modules['__main__'])
         if main.__code__.co_argcount == 0:
             status = main()
         else:

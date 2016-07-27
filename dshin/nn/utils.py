@@ -377,6 +377,7 @@ class NNModel(metaclass=abc.ABCMeta):
         if save_summary and self._summary_ops:
             global_step = self.global_step()
             if is_training:
+                print('Writing summary.', out_eval[-1], global_step)
                 self._train_summary_writer.add_summary(out_eval[-1], global_step)
             else:
                 self._test_summary_writer.add_summary(out_eval[-1], global_step)
