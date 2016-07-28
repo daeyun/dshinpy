@@ -422,3 +422,17 @@ def residual_unit(x, is_training, n_out=None, name='rn', mode='SAME', is_first=F
         add = tf.add(h, x)
 
     return add
+
+
+def layer_summary(value, tag_suffix=None, collections=None):
+    default_collections = [tf.GraphKeys.SUMMARIES]
+
+    if collections is not None:
+        if isinstance(collections, list) or isinstance(collections, tuple):
+            default_collections.extend(collections)
+        elif isinstance(collections, str):
+            default_collections.append(collections)
+        else:
+            raise ValueError()
+
+    tf.histogram_summary(tag=value.name, values=value, collections=default_collections)

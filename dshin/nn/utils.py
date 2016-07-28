@@ -71,6 +71,9 @@ def match_names(values: nn_types.NamedSeq, pattern: str = None,
 
 
 class NNModel(metaclass=abc.ABCMeta):
+    class GraphKeys:
+        SIMPLE_SUMMARIES = 'simple_summaries'
+
     """
     TensorFlow neural net container.
 
@@ -141,6 +144,14 @@ class NNModel(metaclass=abc.ABCMeta):
         net.restore(restore_path=restore_path)
         return net
 
+    @staticmethod
+    def summary_keys(mode='SIMPLE'):
+        if mode == 'SIMPLE':
+            return [NNModel.GraphKeys.SIMPLE_SUMMARIES, tf.GraphKeys.SUMMARIES]
+        elif mode == 'ALL':
+            return [tf.GraphKeys.SUMMARIES]
+        raise ValueError()
+
     def __init__(self, sess: tf.Session = None, seed: int = None, build=True, summary_dir: str = None):
         """
         Creates a new model instance.
@@ -174,6 +185,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 tf.set_random_seed(self.seed)
 
         self._summary_ops = None
+        self._simple_summary_ops = None
 
         if build:
             self._build_model()  # Also initializes variables.
@@ -182,9 +194,11 @@ class NNModel(metaclass=abc.ABCMeta):
     def _init_summaries(self):
         assert not self.needs_initialization
         assert self._summary_ops is None
+        assert self._simple_summary_ops is None
         with self.graph.as_default():
             if self.summary_dir:
                 self._summary_ops = tf.merge_all_summaries()
+                self._simple_summary_ops = tf.merge_all_summaries(key=NNModel.GraphKeys.SIMPLE_SUMMARIES)
                 # Graph is only added to 'train' summary file.
                 self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
                 self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
@@ -325,17 +339,18 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @ensure.ensure_annotations
-    def train(self, feed_dict: dict, save_summary=True):
+    def train(self, feed_dict: dict, summary_mode='SIMPLE'):
         """
         Runs a training step.
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
+        :param summary_mode: Can be 'SIMPLE', 'ALL' or None.
         """
-        self.eval([], feed_dict=feed_dict, is_training=True, save_summary=save_summary)
+        self.eval([], feed_dict=feed_dict, is_training=True, summary_mode=summary_mode)
 
     @ensure.ensure_annotations
-    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, is_training=False, save_summary=True) -> dict:
+    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, summary_mode: str, is_training=False) -> dict:
         """
         Evaluates TensorFlow Operations.
 
@@ -343,6 +358,7 @@ class NNModel(metaclass=abc.ABCMeta):
         also be regex patterns. Must be a list.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
+        :param summary_mode: Can be 'SIMPLE', 'ALL' or None.
         :param is_training: If true, executes a training step.
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
@@ -368,8 +384,13 @@ class NNModel(metaclass=abc.ABCMeta):
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
 
+        assert summary_mode in ['SIMPLE', 'ALL', None]
+
         summary_op_fetch_index = None
-        if save_summary and self._summary_ops is not None:
+        if summary_mode == 'SIMPLE' and self._simple_summary_ops is not None:
+            summary_op_fetch_index = len(fetches)
+            fetches.append(self._simple_summary_ops)
+        elif summary_mode == 'ALL' and self._summary_ops is not None:
             summary_op_fetch_index = len(fetches)
             fetches.append(self._summary_ops)
 
