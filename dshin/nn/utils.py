@@ -350,7 +350,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.eval([], feed_dict=feed_dict, is_training=True, summary_mode=summary_mode)
 
     @ensure.ensure_annotations
-    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, summary_mode: str, is_training=False) -> dict:
+    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, summary_mode: str='SIMPLE', is_training=False) -> dict:
         """
         Evaluates TensorFlow Operations.
 
