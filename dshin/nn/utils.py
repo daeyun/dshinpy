@@ -128,9 +128,9 @@ class NNModel(metaclass=abc.ABCMeta):
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    0.75143
+    1.83994
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    0.75143
+    1.83994
     """
 
     _placeholder_prefix = 'placeholder'
