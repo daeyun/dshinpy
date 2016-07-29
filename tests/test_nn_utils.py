@@ -120,8 +120,9 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
     def train(bn_net):
         bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001})
 
-    def loss(bn_net):
-        return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
+    def loss(bn_net, summary_writer_name=None):
+        return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']},
+                           summary_writer_name=summary_writer_name)['loss']
 
     assert path.isdir(str(tmpdir.join('summary')))
     assert path.isdir(str(tmpdir.join('summary/train')))
@@ -143,6 +144,11 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
 
     # 'eval' is the default summary name if is_training is False.
     assert path.isdir(str(tmpdir.join('summary2/eval')))
+    assert not path.isdir(str(tmpdir.join('summary2/test_experiment_name')))
+
+    loss(bn_net, summary_writer_name='test_experiment_name')
+    assert path.isdir(str(tmpdir.join('summary2/test_experiment_name')))
+
 
 def test_save_and_restore_global_step(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
     out_path = str(tmpdir.join('filename'))

@@ -219,15 +219,14 @@ class NNModel(metaclass=abc.ABCMeta):
             if self.summary_dir:
                 if self._summary_ops is None:
                     self._summary_ops = {}
-                    for k, v in NNModel._summary_modes.items():
-                        assert k not in self._summary_ops
-                        self._summary_ops[k] = tf.merge_all_summaries(key=v)
+                for k, v in NNModel._summary_modes.items():
+                    assert k not in self._summary_ops
+                    self._summary_ops[k] = tf.merge_all_summaries(key=v)
 
                 if self._summary_writers is None:
-                    # Graph is only added to 'train' summary file.
-                    self._summary_writers = {
-                        'train': self._summary_writer('train', graph=self.session.graph)
-                    }
+                    self._summary_writers = {}
+                # Graph is only added to 'train' summary file.
+                self._summary_writers['train'] = self._summary_writer('train', graph=self.session.graph)
 
     @ensure.ensure_annotations
     def _summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
