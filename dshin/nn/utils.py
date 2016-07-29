@@ -115,16 +115,16 @@ class NNModel(metaclass=abc.ABCMeta):
     1.85148
     >>> net.train(feed_dict)
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    0.75167
+    1.84571
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    0.75167
+    1.84571
 
     Save and restore:
 
     >>> net.save('/tmp/sample_net/saved')
     >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    0.75167
+    1.84571
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
