@@ -226,11 +226,11 @@ class NNModel(metaclass=abc.ABCMeta):
 
                 # Graph is only added to 'train' summary file.
                 self._summary_writers = {
-                    'train': self.summary_writer('train', graph=self.session.graph)
+                    'train': self._summary_writer('train', graph=self.session.graph)
                 }
 
     @ensure.ensure_annotations
-    def summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
+    def _summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
         """
         Creates or gets a summary writer.
 
@@ -239,7 +239,10 @@ class NNModel(metaclass=abc.ABCMeta):
         would need to save this.
         :return:
         """
-        if name in self._summary_writers:
+        if self._summary_writers is None:
+            self._summary_writers = {}
+
+        if name not in self._summary_writers:
             summary_writer_path = path.join(self.summary_dir, name)
             log.info('Creating summary writer %s at %s', name, summary_writer_path)
             self._summary_writers[name] = tf.train.SummaryWriter(summary_writer_path, graph=graph)
