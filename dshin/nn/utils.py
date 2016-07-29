@@ -190,7 +190,7 @@ class NNModel(metaclass=abc.ABCMeta):
             self.session = sess
 
         self.seed = seed
-        self.needs_initialization = True
+        self.needs_variable_initialization = True
         if summary_dir:
             self.summary_dir = path.expanduser(summary_dir)
             if not path.isdir(self.summary_dir):
@@ -213,20 +213,21 @@ class NNModel(metaclass=abc.ABCMeta):
             self._init_summaries()  # Sets self._summary_ops
 
     def _init_summaries(self):
-        assert not self.needs_initialization
+        assert not self.needs_variable_initialization
+        assert self._summary_ops is None
+        assert self._summary_writers is None
 
         with self.graph.as_default():
             if self.summary_dir:
-                if self._summary_ops is None:
-                    self._summary_ops = {}
+                self._summary_ops = {}
                 for k, v in NNModel._summary_modes.items():
                     assert k not in self._summary_ops
                     self._summary_ops[k] = tf.merge_all_summaries(key=v)
 
-                if self._summary_writers is None:
-                    self._summary_writers = {}
                 # Graph is only added to 'train' summary file.
-                self._summary_writers['train'] = self._summary_writer('train', graph=self.session.graph)
+                self._summary_writers = {
+                    'train': self._summary_writer('train', graph=self.session.graph)
+                }
 
     @ensure.ensure_annotations
     def _summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
@@ -359,24 +360,28 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         Initializes all TensorFlow variables. Not needed when restoring from a file.
         """
-        if self.needs_initialization:
+        if self.needs_variable_initialization:
             with self.graph.as_default():
                 self.session.run(tf.initialize_all_variables())
-                self.needs_initialization = False
+                self.needs_variable_initialization = False
 
     @ensure.ensure_annotations
     def restore(self, restore_path: str):
         """
-        Restores a previously saved model.
+        Restores a previously saved model. Should be called from `NNModel.from_file`.
 
         :param restore_path: The path used to save the model.
         """
+        # TODO(daeyun): Make this a private method. Or refactor initialization logic.
+        if not self.needs_variable_initialization:
+            return NNModel.from_file(restore_path, self.summary_dir)
+
         with self.graph.as_default():
             with self.session.as_default():
                 self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
                 self.saver.restore(tf.get_default_session(), restore_path)
                 log.info("Restored model from %s", restore_path)
-                self.needs_initialization = False
+                self.needs_variable_initialization = False
                 self._init_summaries()
 
     @ensure.ensure_annotations
@@ -431,7 +436,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param is_training: If true, executes a training step.
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
-        assert not self.needs_initialization, 'Variables are not initialized.'
+        assert not self.needs_variable_initialization, 'Variables are not initialized.'
 
         names = []
         new_feed_dict = {}
@@ -594,7 +599,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param pattern: A regular expression pattern. Defaults to ``.*?``.
         :return: List of Tensors in topological order.
         """
-        assert not self.needs_initialization
+        assert not self.needs_variable_initialization
 
         names = sort_tensors(match_names(self.ops, pattern))
         return [self.get(name, prefix='^', suffix='$') for name in names]
@@ -608,7 +613,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param pattern: A regular expression pattern. Defaults to ``.*?``.
         :return: Last item in `self.sorted_values`.
         """
-        assert not self.needs_initialization
+        assert not self.needs_variable_initialization
 
         values = self.sorted_values(pattern=pattern)
         assert len(values) > 0
