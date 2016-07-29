@@ -112,7 +112,7 @@ class NNModel(metaclass=abc.ABCMeta):
     ...              'target': np.random.randn(2, 5, 5, 1),
     ...              'learning_rate': 0.001}
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    0.75191
+    1.85148
     >>> net.train(feed_dict)
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
     0.75167
