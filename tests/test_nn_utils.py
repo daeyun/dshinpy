@@ -134,11 +134,15 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
 
     bn_net = restore(str(tmpdir.join('summary2')))
     assert path.isdir(str(tmpdir.join('summary2')))
+
+    # 'train' summary containing the graph is saved immediately.
     assert path.isdir(str(tmpdir.join('summary2/train')))
 
     train(bn_net)
     loss(bn_net)
 
+    # 'eval' is the default summary name if is_training is False.
+    assert path.isdir(str(tmpdir.join('summary2/eval')))
 
 def test_save_and_restore_global_step(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
     out_path = str(tmpdir.join('filename'))
