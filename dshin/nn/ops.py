@@ -246,7 +246,7 @@ def ema_with_update_dependencies(values, initial_values=0.0, decay=0.99, name='e
         return identity_vars_with_update, shadow_vars_with_update, shadow_vars_without_update
 
 
-def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=0.02, ema_decay=0.99, return_mean_var=False, is_trainable=True):
+def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=1.0, ema_decay=0.99, return_mean_var=False, is_trainable=True):
     """
     Batch normalization layer.
 
@@ -436,3 +436,6 @@ def layer_summary(value, tag_suffix=None, collections=None):
             raise ValueError()
 
     tf.histogram_summary(tag=value.name, values=value, collections=default_collections)
+
+    # stddev = tf.sqrt(tf.reduce_sum((value - tf.reduce_mean(value)) ** 2) / tf.cast(tf.size(value), tf.float32))
+    # tf.scalar_summary(tags=value.name + '_stddev', values=stddev, collections=default_collections)

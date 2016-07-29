@@ -73,6 +73,13 @@ def match_names(values: nn_types.NamedSeq, pattern: str = None,
 class NNModel(metaclass=abc.ABCMeta):
     class GraphKeys:
         SIMPLE_SUMMARIES = 'simple_summaries'
+        IMAGE_SUMMARIES = 'image_summaries'
+
+        modes = {
+            'SIMPLE': NNModel.GraphKeys.SIMPLE_SUMMARIES,
+            'IMAGE': NNModel.GraphKeys.IMAGE_SUMMARIES,
+            'ALL': tf.GraphKeys.SUMMARIES,
+        }
 
     """
     TensorFlow neural net container.
@@ -145,12 +152,23 @@ class NNModel(metaclass=abc.ABCMeta):
         return net
 
     @staticmethod
-    def summary_keys(mode='SIMPLE'):
-        if mode == 'SIMPLE':
-            return [NNModel.GraphKeys.SIMPLE_SUMMARIES, tf.GraphKeys.SUMMARIES]
-        elif mode == 'ALL':
-            return [tf.GraphKeys.SUMMARIES]
-        raise ValueError()
+    def summary_keys(modes=('SIMPLE',)) -> typing.Sequence[str]:
+        """
+        Returns a list of Graph collection keys.
+
+        :param modes: Can be a string or sequence.
+        :return: List of Tensorflow Graph collection keys.
+        """
+        if isinstance(modes, str):
+            modes = [modes]
+
+        keys = []
+        for mode in modes:
+            if mode not in NNModel.GraphKeys.modes:
+                raise ValueError('Unrecognized summary mode: {}'.format(mode))
+            keys.append(NNModel.GraphKeys.modes[mode])
+
+        return keys
 
     def __init__(self, sess: tf.Session = None, seed: int = None, build=True, summary_dir: str = None):
         """
@@ -195,13 +213,53 @@ class NNModel(metaclass=abc.ABCMeta):
         assert not self.needs_initialization
         assert self._summary_ops is None
         assert self._simple_summary_ops is None
+
+        self._summary_ops = {}
+
         with self.graph.as_default():
             if self.summary_dir:
-                self._summary_ops = tf.merge_all_summaries()
-                self._simple_summary_ops = tf.merge_all_summaries(key=NNModel.GraphKeys.SIMPLE_SUMMARIES)
+                for k, v in NNModel.GraphKeys.modes.items():
+                    assert k not in self._summary_ops
+                    self._summary_ops[k] = tf.merge_all_summaries(key=v)
+
                 # Graph is only added to 'train' summary file.
-                self._train_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'train'), self.session.graph)
-                self._test_summary_writer = tf.train.SummaryWriter(path.join(self.summary_dir, 'test'))
+                self._summary_writers = {
+                    'train': self.summary_writer('train', graph=self.session.graph)
+                }
+
+    @ensure.ensure_annotations
+    def summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
+        """
+        Creates or gets a summary writer.
+
+        :param name: Name of the subdirectory.
+        :param graph: A `tf.Graph` object saved in the summary. In most use cases, only one summary writer
+        would need to save this.
+        :return:
+        """
+        if name in self._summary_writers:
+            summary_writer_path = path.join(self.summary_dir, name)
+            log.info('Creating summary writer %s at %s', name, summary_writer_path)
+            self._summary_writers[name] = tf.train.SummaryWriter(summary_writer_path, graph=graph)
+        return self._summary_writers[name]
+
+    def summary_ops(self, modes=('SIMPLE',)) -> typing.Sequence[tf.Tensor]:
+        """
+        Returns a list of summary Tensors.
+
+        :param modes: Can be a string or sequence.
+        :return: A list of TensorFlow summary Tensors.
+        """
+        if isinstance(modes, str):
+            modes = [modes]
+
+        summaries = []
+        for mode in modes:
+            if mode not in NNModel.GraphKeys.modes:
+                raise ValueError('Unrecognized summary mode: {}'.format(mode))
+            summaries.append(self._summary_ops[mode])
+
+        return summaries
 
     def _build_model(self):
         """
@@ -345,12 +403,17 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
-        :param summary_mode: Can be 'SIMPLE', 'ALL' or None.
+        :param summary_mode: Can be 'SIMPLE', 'ALL', 'IMAGE' or None.
         """
         self.eval([], feed_dict=feed_dict, is_training=True, summary_mode=summary_mode)
 
     @ensure.ensure_annotations
-    def eval(self, tensors_or_patterns: typing.Sequence, feed_dict: dict, summary_mode: str='SIMPLE', is_training=False) -> dict:
+    def eval(self,
+             tensors_or_patterns: typing.Sequence,
+             feed_dict: dict,
+             summary_modes: typing.Sequence[str] = list(),
+             summary_writer_name: str = None,
+             is_training=False) -> dict:
         """
         Evaluates TensorFlow Operations.
 
@@ -358,7 +421,9 @@ class NNModel(metaclass=abc.ABCMeta):
         also be regex patterns. Must be a list.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
-        :param summary_mode: Can be 'SIMPLE', 'ALL' or None.
+        :param summary_modes: A sequence of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
+        :param summary_writer_name: If None, default is 'train' if `is_training` is True, 'eval' otherwise.
+        If this is a new name, a summary writer will be created.
         :param is_training: If true, executes a training step.
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
@@ -384,31 +449,33 @@ class NNModel(metaclass=abc.ABCMeta):
             # There is a race condition here, but it does not matter in most use cases.
             fetches.append(self['train/step$'])
 
-        assert summary_mode in ['SIMPLE', 'ALL', None]
+        for summary_mode in summary_modes:
+            if summary_mode not in self._summary_ops:
+                raise ValueError('Unrecognized summary mode: {}'.format(summary_mode))
 
-        summary_op_fetch_index = None
-        if summary_mode == 'SIMPLE' and self._simple_summary_ops is not None:
-            summary_op_fetch_index = len(fetches)
-            fetches.append(self._simple_summary_ops)
-        elif summary_mode == 'ALL' and self._summary_ops is not None:
-            summary_op_fetch_index = len(fetches)
-            fetches.append(self._summary_ops)
+        summary_ops = self.summary_ops(summary_modes)
+        summary_op_fetch_indices = (len(fetches), len(fetches) + len(summary_ops))
+        if summary_ops:
+            assert isinstance(summary_ops, typing.Sequence[tf.Tensor])
+            fetches.extend(summary_ops)
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
 
-        # Assumes summary op was the last item in `fetches`.
-        if summary_op_fetch_index is not None:
-            global_step = self.global_step()
-            summary_result = out_eval[summary_op_fetch_index]
+        if summary_ops:
+            summary_result = out_eval[summary_op_fetch_indices[0]:summary_op_fetch_indices[1]]
             assert isinstance(summary_result, bytes)
-            if is_training:
-                self._train_summary_writer.add_summary(summary_result, global_step)
-                # TODO(daeyun): Listen for a keypress event to signal flush.
-                self._train_summary_writer.flush()
-            else:
-                self._test_summary_writer.add_summary(summary_result, global_step)
-                self._test_summary_writer.flush()
+
+            if summary_writer_name is None:
+                summary_writer_name = 'train' if is_training else 'eval'
+            assert isinstance(summary_writer_name, str)
+
+            global_step = self.global_step()
+            writer = self._summary_writers[summary_writer_name]
+            writer.add_summary(summary_result, global_step)
+
+            # TODO(daeyun): Listen for a keypress event to signal flush.
+            writer.flush()
 
         results = {}
         for name, result in zip(tensors_or_patterns, out_eval):
