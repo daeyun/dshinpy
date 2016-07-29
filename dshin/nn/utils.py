@@ -206,7 +206,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 tf.set_random_seed(self.seed)
 
         self._summary_ops = None
-        self._simple_summary_ops = None
+        self._summary_writers = None
 
         if build:
             self._build_model()  # Also initializes variables.
@@ -215,7 +215,6 @@ class NNModel(metaclass=abc.ABCMeta):
     def _init_summaries(self):
         assert not self.needs_initialization
         assert self._summary_ops is None
-        assert self._simple_summary_ops is None
 
         self._summary_ops = {}
 
@@ -456,26 +455,27 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_mode not in self._summary_ops:
                 raise ValueError('Unrecognized summary mode: {}'.format(summary_mode))
 
-        summary_ops = self.summary_ops(summary_modes)
+        summary_ops = self.summary_ops(summary_modes) if self._summary_writers else []
         summary_op_fetch_indices = (len(fetches), len(fetches) + len(summary_ops))
         if summary_ops:
-            assert isinstance(summary_ops, typing.Sequence[tf.Tensor])
             fetches.extend(summary_ops)
+
+        assert isinstance(summary_ops, typing.Sequence[tf.Tensor])
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
 
         if summary_ops:
-            summary_result = out_eval[summary_op_fetch_indices[0]:summary_op_fetch_indices[1]]
-            assert isinstance(summary_result, bytes)
-
             if summary_writer_name is None:
                 summary_writer_name = 'train' if is_training else 'eval'
             assert isinstance(summary_writer_name, str)
-
-            global_step = self.global_step()
             writer = self._summary_writers[summary_writer_name]
-            writer.add_summary(summary_result, global_step)
+            global_step = self.global_step()
+
+            summary_results = out_eval[summary_op_fetch_indices[0]:summary_op_fetch_indices[1]]
+            for summary_result in summary_results:
+                assert isinstance(summary_result, bytes)
+                writer.add_summary(summary_result, global_step)
 
             # TODO(daeyun): Listen for a keypress event to signal flush.
             writer.flush()
