@@ -214,20 +214,20 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def _init_summaries(self):
         assert not self.needs_initialization
-        assert self._summary_ops is None
-
-        self._summary_ops = {}
 
         with self.graph.as_default():
             if self.summary_dir:
-                for k, v in NNModel._summary_modes.items():
-                    assert k not in self._summary_ops
-                    self._summary_ops[k] = tf.merge_all_summaries(key=v)
+                if self._summary_ops is None:
+                    self._summary_ops = {}
+                    for k, v in NNModel._summary_modes.items():
+                        assert k not in self._summary_ops
+                        self._summary_ops[k] = tf.merge_all_summaries(key=v)
 
-                # Graph is only added to 'train' summary file.
-                self._summary_writers = {
-                    'train': self._summary_writer('train', graph=self.session.graph)
-                }
+                if self._summary_writers is None:
+                    # Graph is only added to 'train' summary file.
+                    self._summary_writers = {
+                        'train': self._summary_writer('train', graph=self.session.graph)
+                    }
 
     @ensure.ensure_annotations
     def _summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
