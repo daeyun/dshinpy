@@ -70,17 +70,15 @@ def match_names(values: nn_types.NamedSeq, pattern: str = None,
     return matched
 
 
+class GraphKeys(tf.GraphKeys):
+    """
+    Extends TensorFlow Graph collection keys.
+    """
+    SIMPLE_SUMMARIES = 'simple_summaries'
+    IMAGE_SUMMARIES = 'image_summaries'
+
+
 class NNModel(metaclass=abc.ABCMeta):
-    class GraphKeys:
-        SIMPLE_SUMMARIES = 'simple_summaries'
-        IMAGE_SUMMARIES = 'image_summaries'
-
-        modes = {
-            'SIMPLE': NNModel.GraphKeys.SIMPLE_SUMMARIES,
-            'IMAGE': NNModel.GraphKeys.IMAGE_SUMMARIES,
-            'ALL': tf.GraphKeys.SUMMARIES,
-        }
-
     """
     TensorFlow neural net container.
 
@@ -138,6 +136,11 @@ class NNModel(metaclass=abc.ABCMeta):
     _placeholder_prefix = 'placeholder'
     _meta_graph_suffix = '.meta'
     _cached = functools.lru_cache(maxsize=2048, typed=True)
+    _summary_modes = {
+        'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
+        'IMAGE': GraphKeys.IMAGE_SUMMARIES,
+        'ALL': GraphKeys.SUMMARIES,
+    }
 
     @classmethod
     def from_file(cls, restore_path: str, summary_dir: str = None):
@@ -164,9 +167,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
         keys = []
         for mode in modes:
-            if mode not in NNModel.GraphKeys.modes:
+            if mode not in NNModel._summary_modes:
                 raise ValueError('Unrecognized summary mode: {}'.format(mode))
-            keys.append(NNModel.GraphKeys.modes[mode])
+            keys.append(NNModel._summary_modes[mode])
 
         return keys
 
@@ -218,7 +221,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with self.graph.as_default():
             if self.summary_dir:
-                for k, v in NNModel.GraphKeys.modes.items():
+                for k, v in NNModel._summary_modes.items():
                     assert k not in self._summary_ops
                     self._summary_ops[k] = tf.merge_all_summaries(key=v)
 
@@ -255,7 +258,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         summaries = []
         for mode in modes:
-            if mode not in NNModel.GraphKeys.modes:
+            if mode not in NNModel._summary_modes:
                 raise ValueError('Unrecognized summary mode: {}'.format(mode))
             summaries.append(self._summary_ops[mode])
 
