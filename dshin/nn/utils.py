@@ -402,15 +402,15 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @ensure.ensure_annotations
-    def train(self, feed_dict: dict, summary_mode='SIMPLE'):
+    def train(self, feed_dict: dict, summary_modes: typing.Sequence[str] = list()):
         """
         Runs a training step.
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
-        :param summary_mode: Can be 'SIMPLE', 'ALL', 'IMAGE' or None.
+        :param summary_modes: A sequence of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         """
-        self.eval([], feed_dict=feed_dict, is_training=True, summary_mode=summary_mode)
+        self.eval([], feed_dict=feed_dict, is_training=True, summary_modes=summary_modes)
 
     @ensure.ensure_annotations
     def eval(self,
