@@ -10,3 +10,4 @@ zlib
 scipy
 psutil
 pytest
+sphinx
