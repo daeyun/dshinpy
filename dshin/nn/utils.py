@@ -11,6 +11,7 @@ from os import path
 import ensure
 import tensorflow as tf
 import toposort
+import numbers
 
 from dshin import log
 from dshin.nn import types as nn_types
@@ -165,13 +166,13 @@ class NNModel(metaclass=abc.ABCMeta):
         if isinstance(modes, str):
             modes = [modes]
 
-        keys = []
+        keys = [NNModel._summary_modes['ALL']]
         for mode in modes:
             if mode not in NNModel._summary_modes:
                 raise ValueError('Unrecognized summary mode: {}'.format(mode))
             keys.append(NNModel._summary_modes[mode])
 
-        return keys
+        return sorted(list(set(keys)))
 
     def __init__(self, sess: tf.Session = None, seed: int = None, build=True, summary_dir: str = None):
         """
@@ -263,7 +264,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 raise ValueError('Unrecognized summary mode: {}'.format(mode))
             summaries.append(self._summary_ops[mode])
 
-        return summaries
+        return list(set(summaries))
 
     def _build_model(self):
         """
@@ -483,6 +484,7 @@ class NNModel(metaclass=abc.ABCMeta):
             # TODO(daeyun): Listen for a keypress event to signal flush.
             writer.flush()
 
+        # `tensors_or_patterns` and `out_eval` may not be the same size.
         results = {}
         for name, result in zip(tensors_or_patterns, out_eval):
             if result is not None:
@@ -622,6 +624,25 @@ class NNModel(metaclass=abc.ABCMeta):
         :return: The global step value.
         """
         return tf.train.global_step(self.session, self['train/global_step'])
+
+    @ensure.ensure_annotations
+    def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.Summary:
+        """
+        Writes a TensorFlow summary containing a numeric value.
+
+        :param tag: A `string` label that shows up on TensorBoard.
+        :param value: A number.
+        :param summary_writer_name: If this is a new name, a summary writer will be created.
+        Typical names are 'train', 'eval', 'test_my_experiment'.
+        :return:
+        """
+        summary = tf.Summary(value=[
+            tf.Summary.Value(tag=tag, simple_value=value),
+        ])
+        writer = self._summary_writer(summary_writer_name)
+        global_step = self.global_step()
+        writer.add_summary(summary, global_step)
+        return summary
 
 
 class RestoredNNModel(NNModel):
