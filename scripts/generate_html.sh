@@ -15,6 +15,12 @@ set -ex
 PROJ_DIR="$(dirname "${DIR}")"
 cd ${PROJ_DIR}
 
+MINICONDA="$HOME/miniconda"
+export PATH="${MINICONDA}/bin:$PATH"
+hash -r
+
+source activate dshinpy
+
 #---
 EXCLUDE_DIRS=(
 ./dshin/third_party
