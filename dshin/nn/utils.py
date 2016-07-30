@@ -626,7 +626,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return tf.train.global_step(self.session, self['train/global_step'])
 
     @ensure.ensure_annotations
-    def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.Summary:
+    def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.train.SummaryWriter:
         """
         Writes a TensorFlow summary containing a numeric value.
 
@@ -642,7 +642,7 @@ class NNModel(metaclass=abc.ABCMeta):
         writer = self._summary_writer(summary_writer_name)
         global_step = self.global_step()
         writer.add_summary(summary, global_step)
-        return summary
+        return writer
 
 
 class RestoredNNModel(NNModel):
