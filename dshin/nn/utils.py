@@ -404,7 +404,7 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @ensure.ensure_annotations
-    def train(self, feed_dict: dict, summary_modes: typing.Sequence[str] = list()):
+    def train(self, feed_dict: dict, summary_modes: typing.Sequence[str] = None):
         """
         Runs a training step.
 
@@ -438,13 +438,13 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         assert not self.needs_variable_initialization, 'Variables are not initialized.'
         if tensors_or_patterns is None:
-            tensors_or_patterns = {}
+            tensors_or_patterns = []
         if collection_keys is None:
             collection_keys = []
         if feed_dict is None:
             feed_dict = {}
         if summary_modes is None:
-            summary_modes = {}
+            summary_modes = []
 
         names = []
         new_feed_dict = {}
