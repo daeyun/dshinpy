@@ -77,6 +77,7 @@ class GraphKeys(tf.GraphKeys):
     """
     SIMPLE_SUMMARIES = 'simple_summaries'
     IMAGE_SUMMARIES = 'image_summaries'
+    EVAL_VALUES = 'eval_values'
 
 
 class NNModel(metaclass=abc.ABCMeta):
@@ -415,9 +416,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @ensure.ensure_annotations
     def eval(self,
-             tensors_or_patterns: typing.Sequence,
-             feed_dict: dict,
-             summary_modes: typing.Sequence[str] = list(),
+             tensors_or_patterns: typing.Sequence = None,
+             collection_keys: typing.Sequence[str] = None,
+             feed_dict: dict = None,
+             summary_modes: typing.Sequence[str] = None,
              summary_writer_name=None,
              is_training=False) -> dict:
         """
@@ -425,6 +427,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param tensors_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
         also be regex patterns. Must be a list.
+        :param collection_keys: All values in the given collections will be added to `fetches`.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
@@ -434,6 +437,14 @@ class NNModel(metaclass=abc.ABCMeta):
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
         assert not self.needs_variable_initialization, 'Variables are not initialized.'
+        if tensors_or_patterns is None:
+            tensors_or_patterns = {}
+        if collection_keys is None:
+            collection_keys = []
+        if feed_dict is None:
+            feed_dict = {}
+        if summary_modes is None:
+            summary_modes = {}
 
         names = []
         new_feed_dict = {}
@@ -447,7 +458,17 @@ class NNModel(metaclass=abc.ABCMeta):
             else:
                 raise ValueError('Unexpected key in feed_dict: {}'.format(k))
 
-        fetches = [self[pattern] for pattern in tensors_or_patterns]
+        fetches = []
+        for pattern in tensors_or_patterns:
+            try:
+                fetches.append(self[pattern])
+            except:
+                # TODO(daeyun): Show a one-time warning message when this happens.
+                pass
+
+        for collection_key in collection_keys:
+            fetches.extend(self.graph.get_collection(collection_key))
+
         if is_training:
             assert self['learning_rate'].name in names, \
                 'learning_rate should be in feed_dict when is_training is True.'
@@ -465,6 +486,7 @@ class NNModel(metaclass=abc.ABCMeta):
             fetches.extend(summary_ops)
 
         assert isinstance(summary_ops, typing.Sequence[tf.Tensor])
+        assert len(fetches) > 0, '`fetches` cannot be empty.'
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
