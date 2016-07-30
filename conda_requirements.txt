@@ -9,3 +9,4 @@ wheel
 zlib
 scipy
 psutil
+pytest

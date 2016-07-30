@@ -214,20 +214,19 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def _init_summaries(self):
         assert not self.needs_variable_initialization
-        assert self._summary_ops is None
-        assert self._summary_writers is None
 
-        with self.graph.as_default():
-            if self.summary_dir:
+        if self.summary_dir:
+            with self.graph.as_default():
                 self._summary_ops = {}
                 for k, v in NNModel._summary_modes.items():
                     assert k not in self._summary_ops
                     self._summary_ops[k] = tf.merge_all_summaries(key=v)
 
-                # Graph is only added to 'train' summary file.
-                self._summary_writers = {
-                    'train': self._summary_writer('train', graph=self.session.graph)
-                }
+            if self._summary_writers is None:
+                self._summary_writers = {}
+
+            # Graph is only added to 'train' summary file.
+            self._summary_writers['train'] = self._summary_writer('train', graph=self.session.graph)
 
     @ensure.ensure_annotations
     def _summary_writer(self, name='eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
@@ -236,7 +235,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param name: Name of the subdirectory.
         :param graph: A `tf.Graph` object saved in the summary. In most use cases, only one summary writer
-        would need to save this.
+        would need to save this. This is only used when the summar writer does not already exist.
         :return:
         """
         if self._summary_writers is None:
@@ -373,9 +372,6 @@ class NNModel(metaclass=abc.ABCMeta):
         :param restore_path: The path used to save the model.
         """
         # TODO(daeyun): Make this a private method. Or refactor initialization logic.
-        if not self.needs_variable_initialization:
-            return NNModel.from_file(restore_path, self.summary_dir)
-
         with self.graph.as_default():
             with self.session.as_default():
                 self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
@@ -412,7 +408,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
-        :param summary_modes: A sequence of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
+        :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         """
         self.eval([], feed_dict=feed_dict, is_training=True, summary_modes=summary_modes)
 
@@ -421,7 +417,7 @@ class NNModel(metaclass=abc.ABCMeta):
              tensors_or_patterns: typing.Sequence,
              feed_dict: dict,
              summary_modes: typing.Sequence[str] = list(),
-             summary_writer_name: str = None,
+             summary_writer_name=None,
              is_training=False) -> dict:
         """
         Evaluates TensorFlow Operations.
@@ -430,7 +426,7 @@ class NNModel(metaclass=abc.ABCMeta):
         also be regex patterns. Must be a list.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
-        :param summary_modes: A sequence of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
+        :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         :param summary_writer_name: If None, default is 'train' if `is_training` is True, 'eval' otherwise.
         If this is a new name, a summary writer will be created.
         :param is_training: If true, executes a training step.
@@ -476,7 +472,7 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_writer_name is None:
                 summary_writer_name = 'train' if is_training else 'eval'
             assert isinstance(summary_writer_name, str)
-            writer = self._summary_writers[summary_writer_name]
+            writer = self._summary_writer(summary_writer_name)
             global_step = self.global_step()
 
             summary_results = out_eval[summary_op_fetch_indices[0]:summary_op_fetch_indices[1]]
