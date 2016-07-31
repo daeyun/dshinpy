@@ -16,6 +16,8 @@ from dshin import log
 from dshin.nn import types as nn_types
 from dshin.nn import ops as nn_ops
 
+memoize = functools.lru_cache(maxsize=2048, typed=True)
+
 
 @tc.typecheck
 def sort_tensors(ops: nn_types.Operations) -> tc.seq_of(str):
@@ -140,7 +142,6 @@ class NNModel(metaclass=abc.ABCMeta):
 
     _placeholder_prefix = 'placeholder'
     _meta_graph_suffix = '.meta'
-    _cached = functools.lru_cache(maxsize=2048, typed=True)
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
         'IMAGE': GraphKeys.IMAGE_SUMMARIES,
@@ -584,9 +585,9 @@ class NNModel(metaclass=abc.ABCMeta):
             unique[tensor.name] = tensor
         return list(unique.values())
 
-    @_cached
+    @memoize
     @tc.typecheck
-    def count(self, pattern=None) -> int:
+    def count(self, pattern: tc.optional(str) = None) -> int:
         """
         Returns the numbers of values whose name matches the pattern.
 
@@ -595,7 +596,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         return len(match_names(self.all_values, pattern))
 
-    @_cached
+    @memoize
     @tc.typecheck
     def collection(self, collection: str) -> nn_types.Values:
         """
@@ -607,9 +608,9 @@ class NNModel(metaclass=abc.ABCMeta):
         assert collection in self.graph.get_all_collection_keys()
         return self.graph.get_collection(collection)
 
-    @_cached
+    @memoize
     @tc.typecheck
-    def get(self, pattern: str, prefix=None, suffix=None) -> nn_types.ValueOrOperation:
+    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None) -> nn_types.ValueOrOperation:
         """
         Returns a variable or tensor whose name uniquely matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
@@ -630,7 +631,7 @@ class NNModel(metaclass=abc.ABCMeta):
                     len(matched), prefix, pattern, suffix, '\n'.join([item.name for item in matched])))
         return matched[0]
 
-    @_cached
+    @memoize
     @tc.typecheck
     def sorted_values(self, pattern: tc.optional(str) = None) -> nn_types.ValuesOrOperations:
         """
@@ -644,7 +645,7 @@ class NNModel(metaclass=abc.ABCMeta):
         names = sort_tensors(match_names(self.ops, pattern))
         return [self.get(name, prefix='^', suffix='$') for name in names]
 
-    @_cached
+    @memoize
     @tc.typecheck
     def last(self, pattern: tc.optional(str) = None):
         """
