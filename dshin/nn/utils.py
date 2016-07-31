@@ -45,10 +45,10 @@ def sort_tensors(ops: nn_types.Operations) -> tc.seq_of(str):
 
 
 @tc.typecheck
-def match_names(values: nn_types.NamedSeq,
+def match_names(values: nn_types.ValuesOrOperations,
                 pattern: tc.optional(str) = None,
                 prefix: tc.optional(str) = None,
-                suffix: tc.optional(str) = None) -> nn_types.NamedSeq:
+                suffix: tc.optional(str) = None) -> nn_types.ValuesOrOperations:
     """
     Filters TensorFlow graph objects by regular expression.
 
@@ -428,20 +428,20 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @tc.typecheck
     def eval(self,
-             tensors_or_patterns: tc.seq_of(tc.any(tf.Tensor, str)) = None,
-             collection_keys: tc.seq_of(str) = None,
-             feed_dict: dict = None,
-             summary_modes: tc.seq_of(str) = None,
-             summary_writer_name: str = None,
+             tensors_or_patterns: tc.optional(tc.seq_of(tc.any(tf.Tensor, str))) = None,
+             feed_dict: tc.optional(dict) = None,
+             collection_keys: tc.optional(tc.seq_of(str)) = None,
+             summary_modes: tc.optional(tc.seq_of(str)) = None,
+             summary_writer_name: tc.optional(str) = None,
              is_training: bool = False) -> dict:
         """
         Evaluates TensorFlow Operations.
 
         :param tensors_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
         also be regex patterns. Must be a list.
-        :param collection_keys: All values in the given collections will be added to `fetches`.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
+        :param collection_keys: All values in the given collections will be added to `fetches`.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         :param summary_writer_name: If None, default is 'train' if `is_training` is True, 'eval' otherwise.
         If this is a new name, a summary writer will be created.
@@ -525,7 +525,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return results
 
     @tc.typecheck
-    def __getitem__(self, pattern: str) -> nn_types.Value:
+    def __getitem__(self, pattern: str) -> nn_types.ValueOrOperation:
         """
         Same as `get`. Returns a Variable or Tensor whose name uniquely matches the pattern.
         :param pattern: A regular expression pattern.
@@ -572,7 +572,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @property
     @tc.typecheck
-    def all_values(self) -> nn_types.Values:
+    def all_values(self) -> nn_types.ValuesOrOperations:
         """
         Returns all TensorFlow Variables or Operations defined in the graph.
 
@@ -609,7 +609,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @_cached
     @tc.typecheck
-    def get(self, pattern: str, prefix=None, suffix=None) -> nn_types.Value:
+    def get(self, pattern: str, prefix=None, suffix=None) -> nn_types.ValueOrOperation:
         """
         Returns a variable or tensor whose name uniquely matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
@@ -632,9 +632,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @_cached
     @tc.typecheck
-    def sorted_values(self, pattern=None) -> nn_types.Tensors:
+    def sorted_values(self, pattern: tc.optional(str) = None) -> nn_types.ValuesOrOperations:
         """
-        Topologically sorted Tensors.
+        Topologically sorted Tensors, Operations, or Variables.
 
         :param pattern: A regular expression pattern. Defaults to ``.*?``.
         :return: List of Tensors in topological order.
@@ -646,7 +646,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @_cached
     @tc.typecheck
-    def last(self, pattern: str = None):
+    def last(self, pattern: tc.optional(str) = None):
         """
         Last item in `self.sorted_values`. Guaranteed to not have any values that depend on it.
         There may be more than one such value. Returns only one of them.
