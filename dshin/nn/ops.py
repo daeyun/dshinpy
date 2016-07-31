@@ -230,7 +230,7 @@ def ema_with_initial_value(value: nn_types.Value,
                            initial_value: float = 0.0,
                            ema_trainer: tc.optional(tf.train.ExponentialMovingAverage) = None,
                            decay: tc.optional(float) = None,
-                           name: str = 'ema') -> tf.Tensor:
+                           name: str = 'ema') -> nn_types.Value:
     if ema_trainer is None:
         if decay is None:
             decay = 0.99
