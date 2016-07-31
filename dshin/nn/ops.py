@@ -497,7 +497,7 @@ def residual_unit(x: nn_types.Value,
 @tc.typecheck
 def layer_summary(value: nn_types.Value,
                   tag_suffix: tc.optional(str) = None,
-                  collections: tc.optional(tc.seq_of(str)) = None) -> tf.Tensor:
+                  collections: tc.optional(tc.seq_of(str)) = None):
     default_collections = [tf.GraphKeys.SUMMARIES]
 
     if collections is not None:

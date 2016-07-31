@@ -164,7 +164,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @staticmethod
     @tc.typecheck
-    def summary_keys(modes: tc.seq_of(str) = ('SIMPLE',)) -> tc.seq_of(str):
+    def summary_keys(modes: tc.any(tc.seq_of(str), str) = ('SIMPLE',)) -> tc.seq_of(str):
         """
         Returns a list of Graph collection keys.
 
@@ -417,7 +417,7 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @tc.typecheck
-    def train(self, feed_dict: dict, summary_modes: tc.optional(str) = None):
+    def train(self, feed_dict: dict, summary_modes: tc.optional(tc.any(str, tc.seq_of(str))) = None):
         """
         Runs a training step.
 
