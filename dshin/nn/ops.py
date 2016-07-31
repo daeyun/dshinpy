@@ -5,7 +5,9 @@ import math
 
 import numpy as np
 import tensorflow as tf
-import tensorflow.python.framework.ops as tf_ops
+import typecheck as tc
+
+from dshin.nn import types as nn_types
 
 from dshin.third_party import gflags
 
@@ -14,13 +16,21 @@ FLAGS = gflags.FLAGS
 gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
 
 
-def _variable_on_cpu(name, shape, initializer, trainable=True):
+@tc.typecheck
+def _variable_on_cpu(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
     with tf.device('/cpu:0'):
         dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
         return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
 
 
-def conv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv2d", padding='SAME', use_bias=False) -> tf_ops.Tensor:
+@tc.typecheck
+def conv2d(input_tensor: nn_types.Value,
+           n_out: int,
+           k: int = 5,
+           s: int = 1,
+           name: str = "conv2d",
+           padding: str = 'SAME',
+           use_bias: bool = False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 4
 
     with tf.variable_scope(name):
@@ -36,7 +46,14 @@ def conv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv2d", padding=
         return tf.nn.bias_add(conv, b)
 
 
-def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padding='SAME', use_bias=False) -> tf_ops.Tensor:
+@tc.typecheck
+def deconv2d(input_tensor: nn_types.Value,
+             n_out: int,
+             k: int = 5,
+             s: int = 1,
+             name: str = 'deconv2d',
+             padding: str = 'SAME',
+             use_bias: bool = False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 4
 
     with tf.variable_scope(name):
@@ -66,7 +83,14 @@ def deconv2d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv2d', padd
         return tf.nn.bias_add(deconv, b)
 
 
-def conv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv3d", padding='SAME', use_bias=False) -> tf_ops.Tensor:
+@tc.typecheck
+def conv3d(input_tensor: nn_types.Value,
+           n_out: int,
+           k: int = 5,
+           s: int = 1,
+           name: str = "conv3d",
+           padding: str = 'SAME',
+           use_bias: bool = False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 5
 
     with tf.variable_scope(name):
@@ -82,7 +106,14 @@ def conv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name="conv3d", padding=
         return tf.nn.bias_add(conv, b)
 
 
-def deconv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv3d', padding='SAME', use_bias=False) -> tf_ops.Tensor:
+@tc.typecheck
+def deconv3d(input_tensor: nn_types.Value,
+             n_out: int,
+             k: int = 5,
+             s: int = 1,
+             name: str = 'deconv3d',
+             padding: str = 'SAME',
+             use_bias: bool = False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 5
 
     with tf.variable_scope(name):
@@ -111,7 +142,11 @@ def deconv3d(input_tensor: tf_ops.Tensor, n_out, k=5, s=1, name='deconv3d', padd
         return tf.nn.bias_add(deconv, b)
 
 
-def linear(input_tensor: tf_ops.Tensor, n_out: int, name='linear', use_bias=False) -> tf_ops.Tensor:
+@tc.typecheck
+def linear(input_tensor: nn_types.Value,
+           n_out: int,
+           name: str = 'linear',
+           use_bias: bool = False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 2
     assert isinstance(n_out, int)
 
@@ -128,11 +163,13 @@ def linear(input_tensor: tf_ops.Tensor, n_out: int, name='linear', use_bias=Fals
         return tf.nn.bias_add(lin, b)
 
 
-def fixed_unpool(value, name='unpool', mode='ZERO_FILLED'):
+@tc.typecheck
+def fixed_unpool(value: nn_types.Value, name: str = 'unpool', mode: str = 'ZERO_FILLED') -> tf.Tensor:
     """
     Upsampling operation.
 
     :param value: A Tensor of shape [b, d0, d1, ..., dn, ch]
+    :param name: A name for the operation.
     :param mode:
         ZERO_FILLED: N-dimensional version of the unpooling operation from Dosovitskiy et al.
         NEAREST: Fill with the same values.
@@ -156,11 +193,13 @@ def fixed_unpool(value, name='unpool', mode='ZERO_FILLED'):
     return out
 
 
-def fixed_pool(value, name='pool'):
+@tc.typecheck
+def fixed_pool(value: nn_types.Value, name: str = 'pool') -> nn_types.Value:
     """
     Downsampling operation.
 
     :param value: A Tensor of shape [b, d0, d1, ..., dn, ch]
+    :param name: A name for the operation.
     :return: A Tensor of shape [b, d0/2, d1/2, ..., dn/2, ch]
     """
     with tf.name_scope(name) as scope:
@@ -177,7 +216,8 @@ def fixed_pool(value, name='pool'):
     return out
 
 
-def lrelu(input_tensor: tf.Tensor, alpha=0.05, name='lrelu') -> tf.Tensor:
+@tc.typecheck
+def lrelu(input_tensor: nn_types.Value, alpha: float = 0.05, name: str = 'lrelu') -> tf.Tensor:
     """
     Leaky ReLU.
     """
@@ -185,7 +225,12 @@ def lrelu(input_tensor: tf.Tensor, alpha=0.05, name='lrelu') -> tf.Tensor:
         return tf.maximum(alpha * input_tensor, input_tensor, name=name)
 
 
-def ema_with_initial_value(value, initial_value=0.0, ema_trainer=None, decay=None, name='ema'):
+@tc.typecheck
+def ema_with_initial_value(value: nn_types.Value,
+                           initial_value: float = 0.0,
+                           ema_trainer: tc.optional(tf.train.ExponentialMovingAverage) = None,
+                           decay: tc.optional(float) = None,
+                           name: str = 'ema') -> tf.Tensor:
     if ema_trainer is None:
         if decay is None:
             decay = 0.99
@@ -210,7 +255,8 @@ def ema_with_initial_value(value, initial_value=0.0, ema_trainer=None, decay=Non
         return moving_average
 
 
-def ema_with_update_dependencies(values, initial_values=0.0, decay=0.99, name='ema'):
+@tc.typecheck
+def ema_with_update_dependencies(values: nn_types.Value, initial_values: float = 0.0, decay: float = 0.99, name: str = 'ema') -> tf.Tensor:
     with tf.variable_scope(name):
         ema_trainer = tf.train.ExponentialMovingAverage(decay=decay)
         assign_ops = []
@@ -246,7 +292,15 @@ def ema_with_update_dependencies(values, initial_values=0.0, decay=0.99, name='e
         return identity_vars_with_update, shadow_vars_with_update, shadow_vars_without_update
 
 
-def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=1.0, ema_decay=0.99, return_mean_var=False, is_trainable=True):
+@tc.typecheck
+def batch_norm(value: nn_types.Value,
+               is_local: bool = True,
+               name: str = 'bn',
+               offset: float = 0.0,
+               scale: float = 1.0,
+               ema_decay: float = 0.99,
+               return_mean_var: bool = False,
+               is_trainable: bool = True) -> tf.Tensor:
     """
     Batch normalization layer.
 
@@ -298,11 +352,13 @@ def batch_norm(value, is_local=True, name='bn', offset=0.0, scale=1.0, ema_decay
     return bn
 
 
-def flatten(value, name='flatten'):
+@tc.typecheck
+def flatten(value: nn_types.Value, name: str = 'flatten') -> tf.Tensor:
     """
     Flattens the input tensor's shape to be linear.
 
     :param value: A Tensor of shape [b, d0, d1, ...]
+    :param name: A name for the operation.
     :return: A Tensor of shape [b, d0*d1*...]
     """
     with tf.name_scope(name) as scope:
@@ -310,7 +366,12 @@ def flatten(value, name='flatten'):
         return tf.reshape(value, [-1, num_linear], name=scope)
 
 
-def conv_reshape(value, k, num_channels=None, name='conv_reshape', dims=2):
+@tc.typecheck
+def conv_reshape(value: nn_types.Value,
+                 k: int,
+                 num_channels: tc.optional(int) = None,
+                 name: str = 'conv_reshape',
+                 dims: int = 2) -> tf.Tensor:
     assert 2 <= dims <= 3
 
     shape = value.get_shape().as_list()
@@ -328,7 +389,9 @@ def conv_reshape(value, k, num_channels=None, name='conv_reshape', dims=2):
     return tf.reshape(value, out_shape, name=name)
 
 
-def stack_batch_dim(value_list, name='batch_stack'):
+@tc.typecheck
+def stack_batch_dim(value_list: nn_types.Values,
+                    name: str = 'batch_stack') -> tf.Tensor:
     """
     Concatenates Tensors in the batch dimension.
     """
@@ -346,7 +409,8 @@ def stack_batch_dim(value_list, name='batch_stack'):
     return out
 
 
-def apply_concat(value_list, factory, name_prefix='branch') -> tf.Tensor:
+@tc.typecheck
+def apply_concat(value_list: nn_types.Values, factory: callable, name_prefix: str = 'branch') -> tf.Tensor:
     """
     Concatenates Tensors in the channel dimension.
     """
@@ -364,7 +428,13 @@ def apply_concat(value_list, factory, name_prefix='branch') -> tf.Tensor:
     return out
 
 
-def residual_unit(x, is_training, n_out=None, name='rn', mode='SAME', is_first=False):
+@tc.typecheck
+def residual_unit(x: nn_types.Value,
+                  is_training: bool,
+                  n_out: tc.optional(int) = None,
+                  name: str = 'rn',
+                  mode: str = 'SAME',
+                  is_first: bool = False) -> tf.Tensor:
     """
     Uses identity shortcut if `n_out` is None.
     """
@@ -424,7 +494,10 @@ def residual_unit(x, is_training, n_out=None, name='rn', mode='SAME', is_first=F
     return add
 
 
-def layer_summary(value, tag_suffix=None, collections=None):
+@tc.typecheck
+def layer_summary(value: nn_types.Value,
+                  tag_suffix: tc.optional(str) = None,
+                  collections: tc.optional(tc.seq_of(str)) = None) -> tf.Tensor:
     default_collections = [tf.GraphKeys.SUMMARIES]
 
     if collections is not None:
