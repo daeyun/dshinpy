@@ -11,7 +11,7 @@ class BNOnly(nn.utils.NNModel):
     def _model(self):
         out = nn.ops.batch_norm(self['input'], is_trainable=True, is_local=True)
         self._loss = tf.reduce_mean((out - self['target']) ** 2, name='loss')
-        tf.scalar_summary('loss', self._loss)
+        tf.scalar_summary('loss', self._loss, collections=nn.utils.NNModel.summary_keys('SIMPLE'))
 
     def _minimize_op(self):
         return tf.train.AdamOptimizer(self['learning_rate']).minimize(self._loss)
@@ -119,11 +119,12 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
         return BNOnly.from_file(out_path, summary_dir=summary_dir)
 
     def train(bn_net):
-        bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001})
+        bn_net.train({'input': data['input'], 'target': data['target'], 'learning_rate': 0.001},
+                     summary_modes=['TRAIN_UPDATE_RATIO'])
 
     def loss(bn_net, summary_writer_name=None):
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']},
-                           summary_writer_name=summary_writer_name, summary_modes=['ALL'])['loss']
+                           summary_writer_name=summary_writer_name, summary_modes=['SIMPLE', 'IMAGE'])['loss']
 
     assert path.isdir(str(tmpdir.join('summary')))
     assert path.isdir(str(tmpdir.join('summary/train')))

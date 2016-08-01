@@ -146,7 +146,8 @@ class NNModel(metaclass=abc.ABCMeta):
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
         'IMAGE': GraphKeys.IMAGE_SUMMARIES,
-        'UPDATE_RATIO': GraphKeys.TRAIN_UPDATE_SUMMARIES,
+        # NOTE(daeyun): This also runs a training step.
+        'TRAIN_UPDATE_RATIO': GraphKeys.TRAIN_UPDATE_SUMMARIES,
         'ALL': GraphKeys.SUMMARIES,
     }
 
@@ -277,7 +278,9 @@ class NNModel(metaclass=abc.ABCMeta):
         for mode in modes:
             if mode not in NNModel._summary_modes:
                 raise ValueError('Unrecognized summary mode: {}'.format(mode))
-            summaries.append(self._summary_ops[mode])
+            op = self._summary_ops[mode]
+            if op is not None:
+                summaries.append(op)
 
         return list(set(summaries))
 
@@ -309,7 +312,7 @@ class NNModel(metaclass=abc.ABCMeta):
                     train_op = tf.group(*update_ops, name='step')
 
                 # Update ratios of all trainable variables.
-                # Accessible by self.summary_ops['UPDATE_RATIO'].
+                # Accessible by self.summary_ops['TRAIN_UPDATE_RATIO'].
                 with tf.name_scope('delta'):
                     # `eps` prevents dividing by zero.
                     eps = 1e-8
@@ -322,7 +325,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                 prev_norm = var_norms[var_name]
                                 with tf.name_scope(var_name.replace(':0', '').replace(':', '_')) as subscope:
                                     delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
-                                    tf.scalar_summary(delta.name, delta, collections=NNModel.summary_keys('UPDATE_RATIO'))
+                                    tf.scalar_summary(delta.name, delta, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
 
             self.saver = tf.train.Saver(
                 name='saver',
@@ -475,6 +478,10 @@ class NNModel(metaclass=abc.ABCMeta):
             feed_dict = {}
         if summary_modes is None:
             summary_modes = []
+        else:
+            if len(summary_modes) == 0:
+                # TODO(daeyun): Log only once.
+                log.warn('Non-default empty `summary_modes`. This was probably not expected.')
 
         names = []
         new_feed_dict = {}
