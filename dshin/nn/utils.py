@@ -201,7 +201,6 @@ class NNModel(metaclass=abc.ABCMeta):
             self.graph = tf.Graph()
             self.session = tf.Session(graph=self.graph)
         else:
-            assert isinstance(sess, tf.Session)
             self.graph = sess.graph
             self.session = sess
 
