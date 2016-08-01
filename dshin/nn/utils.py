@@ -186,7 +186,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @tc.typecheck
     def __init__(self,
-                 sess: tc.optional(tf.Session) = None,
+                 sess: tc.optional(tc.any(tf.Session, tf.InteractiveSession)) = None,
                  seed: tc.optional(int) = None,
                  build: bool = True,
                  summary_dir: tc.optional(str) = None):
