@@ -483,6 +483,8 @@ class NNModel(metaclass=abc.ABCMeta):
                 # TODO(daeyun): Log only once.
                 log.warn('Non-default empty `summary_modes`. This was probably not expected.')
 
+        # TODO(daeyun): If is_training is false and `fetches` contains an op that updates variables, e.g. minimizer, raise exception.
+
         names = []
         new_feed_dict = {}
         for k, v in feed_dict.items():
