@@ -81,6 +81,7 @@ class GraphKeys(tf.GraphKeys):
     """
     SIMPLE_SUMMARIES = 'simple_summaries'
     IMAGE_SUMMARIES = 'image_summaries'
+    TRAIN_UPDATE_SUMMARIES = 'train_update_summaries'
     EVAL_VALUES = 'eval_values'
 
 
@@ -145,6 +146,7 @@ class NNModel(metaclass=abc.ABCMeta):
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
         'IMAGE': GraphKeys.IMAGE_SUMMARIES,
+        'UPDATE_RATIO': GraphKeys.TRAIN_UPDATE_SUMMARIES,
         'ALL': GraphKeys.SUMMARIES,
     }
 
@@ -305,7 +307,23 @@ class NNModel(metaclass=abc.ABCMeta):
                 update_ops = self.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
                 with tf.control_dependencies([minimize_op]):
                     # Accessed by self['train/step$']
-                    tf.group(*update_ops, name='step')
+                    train_op = tf.group(*update_ops, name='step')
+
+                # Update ratios of all trainable variables.
+                # Accessible by self.summary_ops['UPDATE_RATIO'].
+                with tf.name_scope('delta'):
+                    # `eps` prevents dividing by zero.
+                    eps = 1e-8
+                    # A dict with names as keys.
+                    var_norms = nn_ops.trainable_variable_norms(name='weight_norms')
+                    with tf.control_dependencies(var_norms):
+                        with tf.control_dependencies([tf.group(train_op, name='train_wait')]):
+                            updated_var_norms = nn_ops.trainable_variable_norms(name='updated_weight_norms')
+                            for var_name, updated_norm in updated_var_norms.items():
+                                prev_norm = var_norms[var_name]
+                                with tf.name_scope(var_name.replace(':0', '').replace(':', '_')) as subscope:
+                                    delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
+                                    tf.scalar_summary(delta.name, delta, collections=NNModel.summary_keys('UPDATE_RATIO'))
 
             self.saver = tf.train.Saver(
                 name='saver',

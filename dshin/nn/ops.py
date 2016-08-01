@@ -495,6 +495,27 @@ def residual_unit(x: nn_types.Value,
 
 
 @tc.typecheck
+def trainable_variable_norms(name: str = 'weight_norms') -> dict:
+    """
+    Returns a dict that maps trainable variable names to l2 norm Tensors.
+    :param name: Name of the operation scope.
+    :return: A dict with trainable variable names as keys and Tensors as values.
+    """
+    all_var_norms = {}
+    with tf.name_scope(name):
+        for v in tf.trainable_variables():
+            reduction_axes = np.arange(1, v.get_shape().ndims)
+            varname = v.name
+            with tf.get_default_graph().colocate_with(v):
+                v = tf.identity(v)
+            l2norm = tf.reduce_mean(tf.sqrt(tf.reduce_sum(tf.pow(v, 2),
+                                                          reduction_indices=reduction_axes)),
+                                    name=varname.replace(':0', '').replace(':', '_'))
+            all_var_norms[varname] = l2norm
+    return all_var_norms
+
+
+@tc.typecheck
 def layer_summary(value: nn_types.Value,
                   tag_suffix: tc.optional(str) = None,
                   collections: tc.optional(tc.seq_of(str)) = None):
