@@ -120,25 +120,25 @@ class NNModel(metaclass=abc.ABCMeta):
     ...              'target': np.random.randn(2, 5, 5, 1),
     ...              'learning_rate': 0.001}
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.85148
+    1.58611
     >>> net.train(feed_dict)
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.84571
+    1.57963
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.84571
+    1.57963
 
     Save and restore:
 
     >>> net.save('/tmp/sample_net/saved')
     >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.84571
+    1.57963
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.83994
+    1.57318
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.83994
+    1.57318
     """
 
     _placeholder_prefix = 'placeholder'
