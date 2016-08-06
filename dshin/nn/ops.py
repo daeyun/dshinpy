@@ -294,7 +294,7 @@ def ema_with_update_dependencies(values: nn_types.Value, initial_values: float =
 
 @tc.typecheck
 def batch_norm(value: nn_types.Value,
-               is_local: bool = True,
+               is_local: tc.any(tf.Tensor, bool) = True,
                name: str = 'bn',
                offset: float = 0.0,
                scale: float = 1.0,
@@ -314,7 +314,7 @@ def batch_norm(value: nn_types.Value,
                 train_step = tf.group(*update_ops, name='step')
 
     :param is_local: A Tensor of type tf.bool or a boolean constant. Indicates whether the output tensor should use
-    local stats or moving averages. It is not related to updating the shadow variables.
+    local stats or moving averages. This does not affect updating the shadow variables. True for training, false for testing.
     """
     assert type(is_trainable) == bool
     assert (isinstance(is_local, tf.Tensor) and is_local.dtype == tf.bool) or isinstance(is_local, bool)
@@ -533,3 +533,51 @@ def layer_summary(value: nn_types.Value,
 
     # stddev = tf.sqrt(tf.reduce_sum((value - tf.reduce_mean(value)) ** 2) / tf.cast(tf.size(value), tf.float32))
     # tf.scalar_summary(tags=value.name + '_stddev', values=stddev, collections=default_collections)
+
+
+@tc.typecheck
+def weight_layer(x: nn_types.Value,
+                 name: str,
+                 ch: int,
+                 weight_type: tc.enum(
+                     'conv2d',
+                     'conv3d',
+                     'deconv2d',
+                     'deconv3d',
+                     'linear'
+                 ),
+                 k=4,
+                 s=2,
+                 bn=True):
+    out = x
+    assert out.get_shape().ndims >= 2
+
+    with tf.variable_scope(name):
+        if weight_type == 'linear':
+            if out.get_shape().ndims != 2:
+                out = flatten(out, name='flatten')
+            out = linear(out, ch, use_bias=not bn, name='linear')
+        elif '2d' in weight_type:
+            if out.get_shape().ndims != 4:
+                conv_reshape(out, k=k, num_channels=ch, name='conv_reshape', dims=2)
+            if weight_type == 'conv2d':
+                out = conv2d(out, ch, k=k, s=s, use_bias=not bn, name='conv')
+            elif weight_type == 'deconv2d':
+                out = deconv2d(out, ch, k=k, s=s, use_bias=not bn, name='deconv')
+            else:
+                raise NotImplemented
+        elif '3d' in weight_type:
+            if out.get_shape().ndims != 5:
+                conv_reshape(out, k=k, num_channels=ch, name='conv_reshape', dims=3)
+            if weight_type == 'conv3d':
+                out = conv3d(out, ch, k=k, s=s, use_bias=not bn, name='conv')
+            elif weight_type == 'deconv3d':
+                out = deconv3d(out, ch, k=k, s=s, use_bias=not bn, name='deconv')
+            else:
+                raise NotImplemented
+        else:
+            raise NotImplemented
+        if bn:
+            out = batch_norm(out, True, name='bn')
+        out = lrelu(out, name='relu')
+    return out

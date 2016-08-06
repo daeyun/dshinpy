@@ -353,6 +353,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         return [
             tf.placeholder(tf.float32, name='learning_rate'),
+            tf.placeholder_with_default(False, shape=(), name='is_training')
         ]
 
     @abc.abstractmethod
@@ -513,7 +514,14 @@ class NNModel(metaclass=abc.ABCMeta):
                 'learning_rate should be in feed_dict when is_training is True.'
 
             # There is a race condition here, but it does not matter in most use cases.
+            # `train/step` will update any moving average variables as well.
             fetches.append(self['train/step$'])
+
+            if self['is_training'] not in new_feed_dict:
+                new_feed_dict[self['is_training']] = True
+        else:
+            if self['is_training'] not in new_feed_dict:
+                new_feed_dict[self['is_training']] = False
 
         for summary_mode in summary_modes:
             if summary_mode not in self._summary_ops:
