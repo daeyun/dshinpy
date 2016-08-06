@@ -353,7 +353,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         return [
             tf.placeholder(tf.float32, name='learning_rate'),
-            tf.placeholder_with_default(False, shape=(), name='is_training')
+            tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training')
         ]
 
     @abc.abstractmethod
