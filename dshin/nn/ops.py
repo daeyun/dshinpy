@@ -549,36 +549,42 @@ def weight_layer(x: nn_types.Value,
                  is_training: tc.any(tf.Tensor, bool) = False,
                  k=4,
                  s=2,
-                 bn=True):
+                 bn=True,
+                 use_bias=None,
+                 relu: tc.optional(callable) = lrelu):
     out = x
     assert out.get_shape().ndims >= 2
+
+    if use_bias is None:
+        use_bias = not bn
 
     with tf.variable_scope(name):
         if weight_type == 'linear':
             if out.get_shape().ndims != 2:
                 out = flatten(out, name='flatten')
-            out = linear(out, ch, use_bias=not bn, name='linear')
+            out = linear(out, ch, use_bias=use_bias, name='linear')
         elif '2d' in weight_type:
             if out.get_shape().ndims != 4:
-                conv_reshape(out, k=k, num_channels=ch, name='conv_reshape', dims=2)
+                out = conv_reshape(out, k=k, name='conv_reshape', dims=2)
             if weight_type == 'conv2d':
-                out = conv2d(out, ch, k=k, s=s, use_bias=not bn, name='conv')
+                out = conv2d(out, ch, k=k, s=s, use_bias=use_bias, name='conv')
             elif weight_type == 'deconv2d':
-                out = deconv2d(out, ch, k=k, s=s, use_bias=not bn, name='deconv')
+                out = deconv2d(out, ch, k=k, s=s, use_bias=use_bias, name='deconv')
             else:
                 raise NotImplemented
         elif '3d' in weight_type:
             if out.get_shape().ndims != 5:
-                conv_reshape(out, k=k, num_channels=ch, name='conv_reshape', dims=3)
+                conv_reshape(out, k=k, name='conv_reshape', dims=3)
             if weight_type == 'conv3d':
-                out = conv3d(out, ch, k=k, s=s, use_bias=not bn, name='conv')
+                out = conv3d(out, ch, k=k, s=s, use_bias=use_bias, name='conv')
             elif weight_type == 'deconv3d':
-                out = deconv3d(out, ch, k=k, s=s, use_bias=not bn, name='deconv')
+                out = deconv3d(out, ch, k=k, s=s, use_bias=use_bias, name='deconv')
             else:
                 raise NotImplemented
         else:
             raise NotImplemented
         if bn:
             out = batch_norm(out, is_local=is_training, name='bn')
-        out = lrelu(out, name='relu')
+        if relu is not None:
+            out = relu(out, name='relu')
     return out
