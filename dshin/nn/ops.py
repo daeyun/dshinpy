@@ -546,6 +546,7 @@ def weight_layer(x: nn_types.Value,
                      'deconv3d',
                      'linear'
                  ),
+                 is_training: tc.any(tf.Tensor, bool) = False,
                  k=4,
                  s=2,
                  bn=True):
@@ -578,6 +579,6 @@ def weight_layer(x: nn_types.Value,
         else:
             raise NotImplemented
         if bn:
-            out = batch_norm(out, True, name='bn')
+            out = batch_norm(out, is_local=is_training, name='bn')
         out = lrelu(out, name='relu')
     return out
