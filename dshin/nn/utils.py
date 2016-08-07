@@ -75,6 +75,18 @@ def match_names(values: nn_types.ValuesOrOperations,
     return matched
 
 
+@tc.typecheck
+def default_sess_config(mem: float = 0.95,
+                        log_device_placement: bool = False) -> tf.ConfigProto:
+    conf = tf.ConfigProto()
+    conf.gpu_options.per_process_gpu_memory_fraction = mem
+    conf.gpu_options.allocator_type = 'BFC'
+    conf.gpu_options.allow_growth = True
+    conf.allow_soft_placement = True
+    conf.log_device_placement = log_device_placement
+    return conf
+
+
 class GraphKeys(tf.GraphKeys):
     """
     Extends TensorFlow Graph collection keys.
@@ -200,7 +212,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         if sess is None:
             self.graph = tf.Graph()
-            self.session = tf.Session(graph=self.graph)
+            self.session = tf.Session(graph=self.graph, config=default_sess_config())
         else:
             self.graph = sess.graph
             self.session = sess
@@ -522,6 +534,10 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             if self['is_training'] not in new_feed_dict:
                 new_feed_dict[self['is_training']] = False
+
+        if self._summary_ops is None:
+            # summary_dir is not provided.
+            assert len(summary_modes) == 0
 
         for summary_mode in summary_modes:
             if summary_mode not in self._summary_ops:
