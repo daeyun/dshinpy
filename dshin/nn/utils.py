@@ -758,7 +758,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :return: A scalar `Tensor` of type `string`. The serialized `Summary` protocol buffer.
         """
         if name is None:
-            name = tag + 'summary'
+            name = tag + '_summary'
         shape = value.get_shape().as_list()
         assert len(shape) == 4
         assert shape[-1] in [1, 3, 4]
@@ -773,7 +773,7 @@ class NNModel(metaclass=abc.ABCMeta):
         A wrapper around `tf.scalar_summary` that prints out logs and adds to the `all` collection.
         """
         if name is None:
-            name = tag + 'summary'
+            name = tag + '_summary'
         collections = list(set(list(collections) + NNModel.summary_keys('ALL')))
         log.info('Adding scalar summary tag %s to collections %s.', tag, ','.join(collections))
         summary_op = tf.scalar_summary(tag, value, collections=collections, name=name)
@@ -785,7 +785,7 @@ class NNModel(metaclass=abc.ABCMeta):
         A wrapper around `tf.histogram_summary` that prints out logs and adds to the `all` collection.
         """
         if name is None:
-            name = tag + 'summary'
+            name = tag + '_summary'
         if isinstance(values, tf.Tensor):
             value = values
         else:
