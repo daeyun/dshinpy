@@ -14,7 +14,6 @@ from dshin.nn import utils
 
 __all__ = [
     'graph',
-    'hey',
     'ops',
     'types',
     'utils',

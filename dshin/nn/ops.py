@@ -8,7 +8,6 @@ import tensorflow as tf
 import typecheck as tc
 
 from dshin.nn import types as nn_types
-
 from dshin.third_party import gflags
 
 FLAGS = gflags.FLAGS

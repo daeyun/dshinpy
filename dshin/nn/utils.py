@@ -3,18 +3,19 @@ Helpers for managing TensorFlow neural net models.
 """
 import abc
 import functools
+import numbers
 import os
 import re
 from os import path
 
-import typecheck as tc
 import tensorflow as tf
 import toposort
-import numbers
+import typecheck as tc
+import typing
 
 from dshin import log
-from dshin.nn import types as nn_types
 from dshin.nn import ops as nn_ops
+from dshin.nn import types as nn_types
 
 memoize = functools.lru_cache(maxsize=2048, typed=True)
 
@@ -95,6 +96,7 @@ class GraphKeys(tf.GraphKeys):
     IMAGE_SUMMARIES = 'image_summaries'
     TRAIN_UPDATE_SUMMARIES = 'train_update_summaries'
     EVAL_VALUES = 'eval_values'
+    # Also used: LOSSES, SUMMARIES
 
 
 # noinspection PyBroadException
@@ -323,21 +325,25 @@ class NNModel(metaclass=abc.ABCMeta):
                     # Accessed by self['train/step$']
                     train_op = tf.group(*update_ops, name='step')
 
-                # Update ratios of all trainable variables.
-                # Accessible by self.summary_ops['TRAIN_UPDATE_RATIO'].
-                with tf.name_scope('delta'):
-                    # `eps` prevents dividing by zero.
-                    eps = 1e-8
-                    # A dict with names as keys.
-                    var_norms = nn_ops.trainable_variable_norms(name='weight_norms')
-                    with tf.control_dependencies(var_norms):
-                        with tf.control_dependencies([tf.group(train_op, name='train_wait')]):
-                            updated_var_norms = nn_ops.trainable_variable_norms(name='updated_weight_norms')
-                            for var_name, updated_norm in updated_var_norms.items():
-                                prev_norm = var_norms[var_name]
-                                with tf.name_scope(var_name.replace(':0', '').replace(':', '_')) as subscope:
-                                    delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
-                                    tf.scalar_summary(delta.name, delta, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
+            # Update ratios of all trainable variables.
+            # Accessible by self.summary_ops['TRAIN_UPDATE_RATIO'].
+            with tf.name_scope('delta'):
+                # `eps` prevents dividing by zero.
+                eps = 1e-8
+                # A dict with names as keys.
+                var_norms = nn_ops.trainable_variable_norms(name='weight_norms')
+                deltas = []
+                with tf.control_dependencies(var_norms):
+                    with tf.control_dependencies([tf.group(train_op, name='train_wait')]):
+                        updated_var_norms = nn_ops.trainable_variable_norms(name='updated_weight_norms')
+                        for var_name, updated_norm in updated_var_norms.items():
+                            prev_norm = var_norms[var_name]
+                            tag = 'delta/' + var_name.replace(':0', '').replace(':', '_')
+                            with tf.name_scope(tag) as subscope:
+                                delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
+                                self.scalar_summary(tag, delta, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
+                                deltas.append(delta)
+                self.historgram_summary('deltas', values=deltas, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
 
             self.saver = tf.train.Saver(
                 name='saver',
@@ -655,6 +661,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param collection: A graph collection key. Must exist.
         :return: All values in the collection.
         """
+        # TODO(daeyun): Get unique values in multiple collections.
         assert collection in self.graph.get_all_collection_keys()
         return self.graph.get_collection(collection)
 
@@ -737,6 +744,72 @@ class NNModel(metaclass=abc.ABCMeta):
         global_step = self.global_step()
         writer.add_summary(summary, global_step)
         return writer
+
+    @tc.typecheck
+    def image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+        """
+        A wrapper around `tf.image_summary` that prints out logs and adds to the image collection.
+
+        :param tag: A scalar `Tensor` of type `string`. Used to build the `tag` of the summary values.
+        :param value: A 4-D `uint8` or `float32` `Tensor` of shape `[batch_size, height, width, channels]` where `channels` is 1, 3, or 4.
+        :param max_images: Max number of batch elements to generate images for.
+        :param name: Will be the same as `tag` by default.
+        :param collections: Graph collection keys to which this operation is added. 'image_summaries' is included by default.
+        :return: A scalar `Tensor` of type `string`. The serialized `Summary` protocol buffer.
+        """
+        if name is None:
+            name = tag + 'summary'
+        shape = value.get_shape().as_list()
+        assert len(shape) == 4
+        assert shape[-1] in [1, 3, 4]
+        collections = list(set(list(collections) + NNModel.summary_keys('IMAGE')))
+        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape, ','.join(collections), max_images)
+        summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collections, name=name)
+        return summary_op
+
+    @tc.typecheck
+    def scalar_summary(self, tag: str, value: tf.Tensor, collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+        """
+        A wrapper around `tf.scalar_summary` that prints out logs and adds to the `all` collection.
+        """
+        if name is None:
+            name = tag + 'summary'
+        collections = list(set(list(collections) + NNModel.summary_keys('ALL')))
+        log.info('Adding scalar summary tag %s to collections %s.', tag, ','.join(collections))
+        summary_op = tf.scalar_summary(tag, value, collections=collections, name=name)
+        return summary_op
+
+    @tc.typecheck
+    def historgram_summary(self, tag: str, values: tc.any(tf.Tensor, nn_types.Tensors), collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+        """
+        A wrapper around `tf.histogram_summary` that prints out logs and adds to the `all` collection.
+        """
+        if name is None:
+            name = tag + 'summary'
+        if isinstance(values, tf.Tensor):
+            value = values
+        else:
+            with tf.name_scope('histogram_summary_value') as scope:
+                value = tf.concat(0, [tf.reshape(v, [-1]) for v in values], name=scope)
+        collections = list(set(list(collections) + NNModel.summary_keys('ALL')))
+        log.info('Adding histogram summary tag %s to collection %s', tag, ','.join(collections))
+        summary_op = tf.histogram_summary(tag=tag, name=name, values=value, collections=collections)
+        return summary_op
+
+    @tc.typecheck
+    def collect(self, key: str, values: tc.any(nn_types.Value, nn_types.Values)):
+        """
+        Adds values to a graph collection.
+
+        :param key: Graph key.
+        :param values: A value or a list of values.
+        """
+        if not isinstance(values, typing.Sequence):
+            values = [values]
+        with self.graph.as_default():
+            for value in values:
+                log.info('Adding %s to collection %s', value, key)
+                tf.add_to_collection(key, value)
 
 
 class RestoredNNModel(NNModel):
