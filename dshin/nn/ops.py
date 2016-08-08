@@ -153,12 +153,12 @@ def linear(input_tensor: nn_types.Value,
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / n_in)
         w = _variable_on_cpu('w', [n_in, n_out], initializer=tf.random_normal_initializer(stddev=stddev))
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
         lin = tf.matmul(input_tensor, w)
 
         if not use_bias:
             return lin
 
+        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(lin, b)
 
 
