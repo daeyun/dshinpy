@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/dshinpy.iml" filepath="$PROJECT_DIR$/.idea/dshinpy.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../multiview_shape/.idea/multiview_shape.iml" filepath="$PROJECT_DIR$/../multiview_shape/.idea/multiview_shape.iml" />
     </modules>
   </component>
 </project>
