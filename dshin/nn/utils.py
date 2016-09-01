@@ -96,6 +96,7 @@ class GraphKeys(tf.GraphKeys):
     IMAGE_SUMMARIES = 'image_summaries'
     TRAIN_UPDATE_SUMMARIES = 'train_update_summaries'
     EVAL_VALUES = 'eval_values'
+    LAYER_TENSORS = 'layer_tensors'
     # Also used: LOSSES, SUMMARIES
 
 
@@ -156,6 +157,7 @@ class NNModel(metaclass=abc.ABCMeta):
     """
 
     _placeholder_prefix = 'placeholder'
+    _saver_prefix = 'saver'
     _meta_graph_suffix = '.meta'
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
@@ -332,7 +334,6 @@ class NNModel(metaclass=abc.ABCMeta):
                 eps = 1e-8
                 # A dict with names as keys.
                 var_norms = nn_ops.trainable_variable_norms(name='weight_norms')
-                deltas = []
                 with tf.control_dependencies(var_norms):
                     with tf.control_dependencies([tf.group(train_op, name='train_wait')]):
                         updated_var_norms = nn_ops.trainable_variable_norms(name='updated_weight_norms')
@@ -342,11 +343,17 @@ class NNModel(metaclass=abc.ABCMeta):
                             with tf.name_scope(tag) as subscope:
                                 delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
                                 self.scalar_summary(tag, delta, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
-                                deltas.append(delta)
-                self.historgram_summary('deltas', values=deltas, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
+
+            with tf.name_scope('trainable_var_histograms'):
+                for v in tf.trainable_variables():
+                    var_name = v.name
+                    with tf.get_default_graph().colocate_with(v):
+                        v = tf.identity(v)
+                        tag = 'trainable/' + var_name.replace(':0', '').replace(':', '_')
+                        self.historgram_summary(tag=tag, values=v, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
 
             self.saver = tf.train.Saver(
-                name='saver',
+                name=self._saver_prefix,
                 max_to_keep=10,
                 keep_checkpoint_every_n_hours=0.5,
             )
@@ -468,7 +475,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @tc.typecheck
     def eval(self,
-             tensors_or_patterns: tc.optional(tc.seq_of(tc.any(tf.Tensor, str))) = None,
+             values_or_patterns: tc.optional(tc.seq_of(tc.any(nn_types.Value, str))) = None,
              feed_dict: tc.optional(dict) = None,
              collection_keys: tc.optional(tc.seq_of(str)) = None,
              summary_modes: tc.optional(tc.seq_of(str)) = None,
@@ -477,7 +484,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         Evaluates TensorFlow Operations.
 
-        :param tensors_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
+        :param values_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
         also be regex patterns. Must be a list.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
@@ -489,8 +496,8 @@ class NNModel(metaclass=abc.ABCMeta):
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
         assert not self.needs_variable_initialization, 'Variables are not initialized.'
-        if tensors_or_patterns is None:
-            tensors_or_patterns = []
+        if values_or_patterns is None:
+            values_or_patterns = []
         if collection_keys is None:
             collection_keys = []
         if feed_dict is None:
@@ -517,12 +524,14 @@ class NNModel(metaclass=abc.ABCMeta):
                 raise ValueError('Unexpected key in feed_dict: {}'.format(k))
 
         fetches = []
-        for pattern in tensors_or_patterns:
-            try:
-                fetches.append(self[pattern])
-            except:
-                # TODO(daeyun): Show a one-time warning message when this happens.
-                pass
+        for item in values_or_patterns:
+            if isinstance(item, str):
+                try:
+                    fetches.append(self[item])
+                except:
+                    raise ValueError('Unidentifiable pattern: {}'.format_map(item))
+            else:
+                fetches.append(item)
 
         for collection_key in collection_keys:
             fetches.extend(self.graph.get_collection(collection_key))
@@ -576,7 +585,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         # `tensors_or_patterns` and `out_eval` may not be the same size.
         results = {}
-        for name, result in zip(tensors_or_patterns, out_eval):
+        for name, result in zip(values_or_patterns, out_eval):
             if result is not None:
                 results[name] = result
         return results
@@ -602,16 +611,13 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @property
     @tc.typecheck
-    def tensors(self) -> nn_types.Tensors:
+    def activations(self) -> nn_types.Tensors:
         """
-        Returns the output values of TensorFlow Operations defined in the graph.
+        Returns layer activation tensors.
 
-        :return: Output values of all operations in the graph.
+        :return: Activation tensors.
         """
-        out = []
-        for op in self.graph.get_operations():
-            out.extend(op.outputs)
-        return out
+        return self.graph.get_collection(tf.GraphKeys.ACTIVATIONS)
 
     @property
     @tc.typecheck
@@ -635,10 +641,21 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :return: All variables and operations in the graph.
         """
-        values = self.tensors + self.variables + self.ops
         unique = {}
-        for tensor in values:
-            unique[tensor.name] = tensor
+        for value in self.ops:
+            unique[value.name] = value
+
+        # Includes placeholders.
+        for op in self.graph.get_operations():
+            for value in op.outputs:
+                unique[value.name] = value
+
+        for value in self.activations:
+            unique[value.name] = value
+
+        for value in self.variables:
+            unique[value.name] = value
+
         return list(unique.values())
 
     @memoize

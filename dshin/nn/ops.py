@@ -1,6 +1,7 @@
 """
 Helper functions for building TensorFlow neural net layers.
 """
+import functools
 import math
 
 import numpy as np
@@ -15,6 +16,16 @@ FLAGS = gflags.FLAGS
 gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
 
 
+def layer(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwds):
+        output = func(*args, **kwds)
+        tf.get_default_graph().add_to_collection(tf.GraphKeys.ACTIVATIONS, output)
+        return output
+
+    return wrapper
+
+
 @tc.typecheck
 def _variable_on_cpu(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
     with tf.device('/cpu:0'):
@@ -22,6 +33,7 @@ def _variable_on_cpu(name: str, shape: tc.seq_of(int), initializer: callable, tr
         return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
 
 
+@layer
 @tc.typecheck
 def conv2d(input_tensor: nn_types.Value,
            n_out: int,
@@ -45,6 +57,7 @@ def conv2d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(conv, b)
 
 
+@layer
 @tc.typecheck
 def deconv2d(input_tensor: nn_types.Value,
              n_out: int,
@@ -82,6 +95,7 @@ def deconv2d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(deconv, b)
 
 
+@layer
 @tc.typecheck
 def conv3d(input_tensor: nn_types.Value,
            n_out: int,
@@ -105,6 +119,7 @@ def conv3d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(conv, b)
 
 
+@layer
 @tc.typecheck
 def deconv3d(input_tensor: nn_types.Value,
              n_out: int,
@@ -141,6 +156,7 @@ def deconv3d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(deconv, b)
 
 
+@layer
 @tc.typecheck
 def linear(input_tensor: nn_types.Value,
            n_out: int,
@@ -162,6 +178,7 @@ def linear(input_tensor: nn_types.Value,
         return tf.nn.bias_add(lin, b)
 
 
+@layer
 @tc.typecheck
 def fixed_unpool(value: nn_types.Value, name: str = 'unpool', mode: str = 'ZERO_FILLED') -> tf.Tensor:
     """
@@ -192,6 +209,7 @@ def fixed_unpool(value: nn_types.Value, name: str = 'unpool', mode: str = 'ZERO_
     return out
 
 
+@layer
 @tc.typecheck
 def fixed_pool(value: nn_types.Value, name: str = 'pool') -> nn_types.Value:
     """
@@ -215,6 +233,7 @@ def fixed_pool(value: nn_types.Value, name: str = 'pool') -> nn_types.Value:
     return out
 
 
+@layer
 @tc.typecheck
 def lrelu(input_tensor: nn_types.Value, alpha: float = 0.05, name: str = 'lrelu') -> tf.Tensor:
     """
@@ -291,6 +310,7 @@ def ema_with_update_dependencies(values: nn_types.Value, initial_values: float =
         return identity_vars_with_update, shadow_vars_with_update, shadow_vars_without_update
 
 
+@layer
 @tc.typecheck
 def batch_norm(value: nn_types.Value,
                is_local: tc.any(tf.Tensor, bool) = True,
@@ -301,7 +321,6 @@ def batch_norm(value: nn_types.Value,
                return_mean_var: bool = False,
                is_trainable: bool = True) -> tf.Tensor:
     """
-    Batch normalization layer.
 
     For updating the EMA variables, use the following idiom from TensorFlow documentation:
 
@@ -332,6 +351,8 @@ def batch_norm(value: nn_types.Value,
         gamma = _variable_on_cpu('gamma', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
 
         batch_mean, batch_var = tf.nn.moments(value, axes, name='moments')
+        batch_var = tf.maximum(batch_var, 0.0)
+
         ema_trainer = tf.train.ExponentialMovingAverage(decay=ema_decay)
 
         ema_batch_mean = ema_with_initial_value(batch_mean, 0.0, ema_trainer)
@@ -428,6 +449,7 @@ def apply_concat(value_list: nn_types.Values, factory: callable, name_prefix: st
 
 
 @tc.typecheck
+@layer
 def residual_unit(x: nn_types.Value,
                   is_training: bool,
                   n_out: tc.optional(int) = None,
@@ -584,6 +606,12 @@ def weight_layer(x: nn_types.Value,
             raise NotImplemented
         if bn:
             out = batch_norm(out, is_local=is_training, name='bn')
+
+        var_name = out.name
+        tag = 'response/' + var_name.replace(':0', '').replace(':', '_')
+        tf.histogram_summary(tag, out, name=tag)
+
         if relu is not None:
             out = relu(out, name='relu')
+            # out = tf.nn.relu(out, name='relu')
     return out

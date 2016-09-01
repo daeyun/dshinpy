@@ -184,3 +184,26 @@ def test_save_and_restore_global_step(bn_net: nn.utils.NNModel, tmpdir: local.Lo
 
     loss(bn_net)
     assert bn_net.global_step() == 2
+
+
+def test_save_and_restore_placeholders(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
+    out_path = str(tmpdir.join('filename'))
+
+    def save(bn_net):
+        bn_net.save(out_path)
+
+    def restore():
+        return BNOnly.from_file(out_path, summary_dir=str(tmpdir.join('summary')))
+
+    assert isinstance(bn_net['placeholder/input'], tf.Tensor)
+    assert isinstance(bn_net['placeholder/target'], tf.Tensor)
+
+    save(bn_net)
+    assert isinstance(bn_net['placeholder/input'], tf.Tensor)
+    assert isinstance(bn_net['placeholder/target'], tf.Tensor)
+
+    bn_net = restore()
+    assert isinstance(bn_net['placeholder/input'], tf.Tensor)
+    assert isinstance(bn_net['placeholder/target'], tf.Tensor)
+    assert isinstance(bn_net['input'], tf.Tensor)
+    assert isinstance(bn_net['target'], tf.Tensor)
