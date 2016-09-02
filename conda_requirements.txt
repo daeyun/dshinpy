@@ -11,3 +11,4 @@ scipy
 psutil
 pytest
 sphinx
+ipython
