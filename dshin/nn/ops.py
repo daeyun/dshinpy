@@ -615,3 +615,23 @@ def weight_layer(x: nn_types.Value,
             out = relu(out, name='relu')
             # out = tf.nn.relu(out, name='relu')
     return out
+
+
+def npz_to_tensor(filename_tensor, dtype, shape):
+    assert filename_tensor.dtype == tf.string
+
+    def _npz_to_array(filename):
+        if isinstance(filename, bytes):
+            filename = filename.decode('utf-8')
+        arr = np.load(filename)['data']
+        arr.shape = shape
+        if arr.dtype != dtype.as_numpy_dtype():
+            arr = arr.astype(dtype=dtype.as_numpy_dtype())
+        assert arr.dtype == dtype.as_numpy_dtype()
+        return arr
+
+    out = tf.py_func(_npz_to_array, [filename_tensor], [dtype], stateful=False)
+    tensor = out[0]
+    tensor.set_shape(shape)
+
+    return tensor

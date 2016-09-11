@@ -2,6 +2,7 @@
 Helpers for managing TensorFlow neural net models.
 """
 import abc
+import contextlib
 import functools
 import numbers
 import os
@@ -14,10 +15,28 @@ import typecheck as tc
 import typing
 
 from dshin import log
+from dshin.nn import graph
 from dshin.nn import ops as nn_ops
 from dshin.nn import types as nn_types
 
 memoize = functools.lru_cache(maxsize=2048, typed=True)
+
+
+class QueuePlaceholder(object):
+    def __init__(self, dtype, shape, name, is_file):
+        self.dtype = dtype
+        self.shape = shape
+        self.name = name
+        self.is_file = is_file
+
+
+class QueueComponents(object):
+    def __init__(self, name, placeholders, tensors, enqueue_op=None, queue=None):
+        self.name = name
+        self.placeholders = placeholders
+        self.tensors = tensors
+        self.enqueue_op = enqueue_op
+        self.queue = queue
 
 
 @tc.typecheck
@@ -51,35 +70,47 @@ def sort_tensors(ops: nn_types.Operations) -> tc.seq_of(str):
 def match_names(values: nn_types.ValuesOrOperations,
                 pattern: tc.optional(str) = None,
                 prefix: tc.optional(str) = None,
-                suffix: tc.optional(str) = None) -> nn_types.ValuesOrOperations:
+                suffix: tc.optional(str) = None,
+                return_final_pattern=False):
     """
     Filters TensorFlow graph objects by regular expression.
 
     :param values: A list of Variables, Tensors, or Operations.
     :param pattern: A regular expression pattern.
-    :param prefix: A string prepended to `pattern`. Defaults to ``.*?``.
-    :param suffix: A string appended to `pattern`. Defaults to ``.*?``.
-    :return:
+    :param prefix: A string prepended to `pattern`. Defaults to ``(?:^|.*/)``.
+    :param suffix: A string appended to `pattern`. Defaults to ``(?:/.*|$)`.
+    :param return_final_pattern: If `True`, return a tuple (list of matched values, regex pattern).
+    :return: A list of matched graph objects. And optionally the regex pattern used for the search.
     """
     if pattern is None:
         pattern = r'.*?'
     if prefix is None:
-        prefix = r'.*?'
+        if pattern.startswith('^'):
+            prefix = ''
+        else:
+            prefix = r'(?:^|.*/)'
     if suffix is None:
-        suffix = r'.*?'
+        if pattern.endswith('$'):
+            suffix = ''
+        else:
+            suffix = r'(?:/.*|$)'
 
     final_pattern = ''.join([prefix, pattern, suffix])
     matched = []
     for item in values:
         if re.match(final_pattern, item.name):
             matched.append(item)
+
+    if return_final_pattern:
+        return matched, final_pattern
     return matched
 
 
 @tc.typecheck
 def default_sess_config(mem: float = 0.95,
-                        log_device_placement: bool = False) -> tf.ConfigProto:
-    conf = tf.ConfigProto()
+                        log_device_placement: bool = False,
+                        device_filters=None) -> tf.ConfigProto:
+    conf = tf.ConfigProto(device_filters=device_filters)
     conf.gpu_options.per_process_gpu_memory_fraction = mem
     conf.gpu_options.allocator_type = 'BFC'
     conf.gpu_options.allow_growth = True
@@ -107,13 +138,14 @@ class NNModel(metaclass=abc.ABCMeta):
 
     Implementation example:
 
-    >>> class SampleNet(NNModel):
+    >>> from dshin import nn
+    >>> class SampleNet(nn.utils.NNModel):
     ...     def _model(self):
     ...         input_placeholder = self['input']
     ...         target_placeholder = self['target']
     ... 
-    ...         out = nn_ops.conv2d(input_placeholder, n_out=1, use_bias=False)
-    ...         out = nn_ops.batch_norm(out, is_trainable=True, is_local=True)
+    ...         out = nn.ops.conv2d(input_placeholder, n_out=1, use_bias=False)
+    ...         out = nn.ops.batch_norm(out, is_trainable=True, is_local=True)
     ...         self._loss = tf.reduce_mean((out - target_placeholder) ** 2, name='loss')
     ... 
     ...     def _minimize_op(self):
@@ -135,30 +167,37 @@ class NNModel(metaclass=abc.ABCMeta):
     ...              'target': np.random.randn(2, 5, 5, 1),
     ...              'learning_rate': 0.001}
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.58611
+    1.26110
     >>> net.train(feed_dict)
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.57963
+    1.25654
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.57963
+    1.25654
 
     Save and restore:
 
     >>> net.save('/tmp/sample_net/saved')
     >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.57963
+    1.25654
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.57318
+    1.25199
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.57318
+    1.25199
     """
 
     _placeholder_prefix = 'placeholder'
+    _producer_queue_prefix = 'queue'
+    _consumer_queue_prefix = 'worker_queue'
     _saver_prefix = 'saver'
     _meta_graph_suffix = '.meta'
+    _worker_batch_size_placeholder_name = 'batch_size'
+    _global_step_variable_name = 'global_step'
+    _global_queue_buffer_size = 2000
+    _worker_queue_buffer_size = 100
+    _worker_queue_num_threads = 10
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
         'IMAGE': GraphKeys.IMAGE_SUMMARIES,
@@ -206,14 +245,21 @@ class NNModel(metaclass=abc.ABCMeta):
                  sess: tc.optional(tc.any(tf.Session, tf.InteractiveSession)) = None,
                  seed: tc.optional(int) = None,
                  build: bool = True,
-                 summary_dir: tc.optional(str) = None):
+                 summary_dir: tc.optional(str) = None,
+                 input_queue_device=None):
         """
         Creates a new model instance.
 
         :param sess: A TensorFlow Session.
         :param seed: The graph-level random seed.
-        :param build: If true, builds and initializes the model.
+        :param build: If `True`, builds and initializes the model.
+        :param summary_dir: Path to the summary directory. Created if not exists.
+        :param input_queue_device: Device for the input producer queue operations. Defaults to the `global_step` Variable's device
         """
+        self.seed = seed
+        self.needs_variable_initialization = True
+        self.input_queue_device = input_queue_device
+
         if sess is None:
             self.graph = tf.Graph()
             self.session = tf.Session(graph=self.graph, config=default_sess_config())
@@ -221,8 +267,6 @@ class NNModel(metaclass=abc.ABCMeta):
             self.graph = sess.graph
             self.session = sess
 
-        self.seed = seed
-        self.needs_variable_initialization = True
         if summary_dir:
             self.summary_dir = path.expanduser(summary_dir)
             if not path.isdir(self.summary_dir):
@@ -243,6 +287,24 @@ class NNModel(metaclass=abc.ABCMeta):
         if build:
             self._build_model()  # Also initializes variables.
             self._init_summaries()  # Sets self._summary_ops
+
+        # TODO(daeyun)
+        graph.save_graph_text_summary(self.graph)
+        self.queue_runner_threads = self._run_queue_runners()
+
+    def _run_queue_runners(self):
+        self.coordinator = tf.train.Coordinator()
+        return tf.train.start_queue_runners(self.session, self.coordinator)
+
+    def shutdown(self):
+        assert not self.needs_variable_initialization
+        self.coordinator.request_stop()
+
+        # Unblock blocking queue operations.
+        self.session.run(self['{}/close'.format(NNModel._consumer_queue_prefix)])
+        self.session.run(self['{}/close'.format(NNModel._producer_queue_prefix)])
+
+        self.coordinator.join(stop_grace_period_secs=10)
 
     def _init_summaries(self):
         assert not self.needs_variable_initialization
@@ -300,22 +362,183 @@ class NNModel(metaclass=abc.ABCMeta):
 
         return list(set(summaries))
 
+    @tc.typecheck
+    def _build_producer_queue(self,
+                              placeholder_specs: tc.seq_of(QueuePlaceholder),
+                              queue_name: str,
+                              queue_device: tc.any(str, typing.Callable)):
+        """
+        Builds an input queue that atomically operates on the set of values specified by `QueuePlaceholder` objects.
+        In order to use this as a global queue in a distributed model, all workers should use the same `queue_device`,
+        e.g. `/job:ps/task:0`, when building the shared queue.
+
+        Ideally, this should not transmit a lot of data (otherwise there could be a network IO bottleneck), and large arrays
+        should be passed as a filename instead.
+
+        Side effect: Creates new placeholders in the `placeholder/{queue_name}/` scope. They are used in the enqueue operation.
+
+        :param placeholder_specs: A list of `QueuePlaceholder` objects. If `is_file` is `True`, the corresponding placeholder will have
+        dtype `tf.string`. And the corresponding output tensor will have dtype `placeholder_spec.dtype`. All tensor shapes must have `None`
+        as the first dimension.
+        :param queue_name: A unique name. Used as a prefix for the placeholder names. e.g. `placeholder/{queue_name}/{tensor_name}`
+        :param queue_device: Device for the queue operations.
+        :return: A `QueueComponents` with the following fields:
+            name: The name of the created queue. e.g. `{queue_name}`
+            enqueue_op: An `enqueue_many` operation that enqueues placeholder values.
+            placeholders: A list of placeholders used to insert new values to the queue. `placeholders[i]` corresponds
+                          to `placeholder_specs[i]`. If `placeholder_specs[i].is_file` is `True`, the type will be a list of strings.
+            tensors: A dictionary that maps placeholder names to output tensors derived from the dequeued values.
+                     Shape of the tensors will be `placeholder_spec.shape[1:]`
+            queue: The `tf.FIFOQueue` object. Not needed in most use cases.
+        """
+        assert len(placeholder_specs) > 0
+        names, dtypes, shapes, placeholders = [], [], [], []
+        input_specs_by_name = {item.name: item for item in placeholder_specs}
+        for item in placeholder_specs:
+            assert item.shape[0] is None
+
+            if item.is_file:
+                dtype = tf.string
+                shape = [item.shape[0]]
+            else:
+                dtype = item.dtype
+                shape = item.shape
+
+            existing_placeholders = self._find_placeholders()
+
+            # Placeholders for global enqueue ops.
+            # Accessed by `self['placeholder/{queue_name}/{tensor_name}']`
+            with graph.abs_name_scope(NNModel._placeholder_prefix):
+                name = '{}/{}'.format(queue_name, item.name)
+                assert name not in existing_placeholders
+                placeholder = tf.placeholder(dtype=dtype, shape=shape, name=name)
+
+            names.append(item.name)
+            dtypes.append(dtype)
+            shapes.append(shape[1:])
+            placeholders.append(placeholder)
+
+        with tf.variable_scope(queue_name):
+            with tf.device(queue_device):
+                queue = tf.FIFOQueue(self._global_queue_buffer_size, dtypes=dtypes, shapes=shapes,
+                                     names=names, shared_name=queue_name, name=queue_name)
+                enqueue_tensors = {name: placeholder for name, placeholder in zip(names, placeholders)}
+
+                # `enqueue_op` is an atomic operation. Values for all of `placeholder/{queue_name}/*` need to be specified at runtime.
+                enqueue_op = queue.enqueue_many(enqueue_tensors, name='enqueue')
+
+                with graph.abs_name_scope(queue_name):
+                    # `queue/size:0`.
+                    queue.size(name='size')
+                    queue.close(True, name='close')
+
+            dequeue_tensors = queue.dequeue(name='dequeue')
+            assert isinstance(dequeue_tensors, dict)
+
+        tensors = {}
+        for name, value in dequeue_tensors.items():
+            input_spec = input_specs_by_name[name]
+            if input_spec.is_file:
+                # In a distributed setting, this should happen on the worker's device.
+                value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=input_spec.shape[1:])
+            else:
+                # Sanity check.
+                value.get_shape().assert_is_compatible_with(input_spec.shape[1:])
+            tensors[name] = value
+
+        return QueueComponents(name=queue.name, enqueue_op=enqueue_op, placeholders=placeholders, tensors=tensors, queue=queue)
+
+    def _build_batch_tensors(self, name, batch_size, producer_queue_components: QueueComponents, placeholder_name_prefix=None):
+        """
+        Returns a batched tensor that pulls and concatenates values from the producer queue upon evaluation.
+
+        Values dequeued from the producer will be buffered in a consumer queue. A `QueueRunner` for this queue will be added to the
+        current `Graph`'s `QUEUE_RUNNERS` collection.
+
+        This function also creates new placeholders in the `placeholder/` scope for directly feeding tensors instead of dequeueing
+        from the queue.
+
+        :param name: A name for the operations.
+        :param batch_size: An integer, Tensor, or Variable batch size pulled from the consumer queue in the dequeue operation.
+        :param producer_queue_components: The components of the queue feeding into this queue. See `QueueComponents`.
+        :param placeholder_name_prefix: Optional name prefix for the placeholders created by this function.
+        :return: A `QueueComponents` with the following fields:
+            name: The name of the created queue. e.g. `{name}/fifo_queue`
+            placeholders: A list of placeholders used to insert new values to the queue. `placeholders[i]` corresponds
+                          to `placeholder_specs[i]`. If `placeholder_specs[i].is_file` is `True`, the type will be a list of strings.
+            tensors: A dictionary that maps placeholder names to output tensors derived from the dequeued values.
+                     Shape of the tensors will be `placeholder_spec.shape[1:]`
+            queue: The `tf.FIFOQueue` object. Not needed in most use cases.
+        """
+        with graph.collect_values(tf.GraphKeys.QUEUE_RUNNERS) as queue_runners:
+            batch_tensors = tf.train.batch(producer_queue_components.tensors,
+                                           batch_size=batch_size,
+                                           num_threads=self._worker_queue_num_threads,
+                                           capacity=self._worker_queue_buffer_size,
+                                           allow_smaller_final_batch=True,
+                                           name=name)
+
+        assert len(queue_runners) == 1
+        queue = queue_runners[0].queue
+
+        with graph.abs_name_scope(name):
+            # `worker_queue/size:0`.
+            queue.size('size')
+            queue.close(True, name='close')
+
+        existing_placeholders = self._find_placeholders()
+
+        placeholders = []
+        assert isinstance(batch_tensors, dict)
+        for key, tensor in batch_tensors.items():
+            assert isinstance(tensor, tf.Tensor)
+            shape = tensor.get_shape()
+            assert shape[0].value is None
+            for dim in shape[1:]:
+                assert dim.value is not None
+            with graph.abs_name_scope(NNModel._placeholder_prefix):
+                if placeholder_name_prefix is not None:
+                    key = placeholder_name_prefix + key
+                assert key not in existing_placeholders
+                placeholder = tf.placeholder_with_default(tensor, shape=shape, name=key)
+            placeholders.append(placeholder)
+
+        return QueueComponents(name=queue.name, placeholders=placeholders, tensors=batch_tensors, queue=queue)
+
+    @contextlib.contextmanager
+    def _placeholder_scope(self):
+        with tf.name_scope(NNModel._placeholder_prefix + '/') as scope:
+            yield scope
+
     def _build_model(self):
         """
         Populates the graph using user-defined functions.
         """
         with self.graph.as_default():
-            with tf.variable_scope(NNModel._placeholder_prefix):
-                self.placeholders = self.default_placeholders()
-                self.placeholders.extend(self._placeholders())
+            # Accessed by self['global_step']
+            global_step = tf.get_variable(NNModel._global_step_variable_name, tuple(),
+                                          initializer=tf.constant_initializer(0), dtype=tf.int64, trainable=False)
+            if self.input_queue_device is None:
+                self.input_queue_device = global_step.device
+
+            with graph.abs_name_scope(NNModel._placeholder_prefix):
+                self.default_placeholders()
+                user_placeholders = self._placeholders()
+
+            self.batch_size = self._find_placeholders()[self._worker_batch_size_placeholder_name]
+            assert isinstance(self.batch_size, tf.Tensor)
+
+            placeholder_specs = list(filter(lambda item: isinstance(item, QueuePlaceholder), user_placeholders))
+            if placeholder_specs:
+                queue_components = self._build_producer_queue(placeholder_specs, self._producer_queue_prefix, self.input_queue_device)
+                self._build_batch_tensors(name=self._consumer_queue_prefix, batch_size=self.batch_size,
+                                          producer_queue_components=queue_components)
 
             # Builds the main model.
             self._model()
 
             with tf.variable_scope('train'):
                 with tf.device('/cpu:0'):
-                    # Accessed by self['train/global_step$']
-                    global_step = tf.get_variable('global_step', (), initializer=tf.constant_initializer(0), dtype=tf.int64, trainable=False)
                     tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, global_step.assign_add(1))
 
                 minimize_op = self._minimize_op()
@@ -353,12 +576,29 @@ class NNModel(metaclass=abc.ABCMeta):
                         self.historgram_summary(tag=tag, values=v, collections=NNModel.summary_keys('TRAIN_UPDATE_RATIO'))
 
             self.saver = tf.train.Saver(
-                name=self._saver_prefix,
+                name=NNModel._saver_prefix,
                 max_to_keep=10,
                 keep_checkpoint_every_n_hours=0.5,
             )
 
         self.initialize()
+
+    def _find_placeholders(self):
+        placeholders = {}
+        for op in tf.get_default_graph().get_operations():
+            try:
+                for tensor in op.outputs:
+                    name = self._parse_placeholder_name(tensor)
+                    placeholders[name] = tensor
+            except:
+                continue
+        return placeholders
+
+    def _parse_placeholder_name(self, tensor):
+        m = re.match(r'^{}/([^:]+):0$'.format(self._placeholder_prefix), tensor.name)
+        if m is None:
+            raise ValueError('Invalid tensor name: {}'.format(tensor.name))
+        return m.group(1)
 
     @tc.typecheck
     def default_placeholders(self) -> tc.seq_of(tf.Tensor):
@@ -371,23 +611,24 @@ class NNModel(metaclass=abc.ABCMeta):
             x = self.get('placeholder/learning_rate')
             x = self['placeholder/learning_rate']
 
-            # Equivalent if no other names contain 'learning_rate'.
+            # This is equivalent to the above if no other names contain 'learning_rate'.
             x = self['learning_rate']
 
         :return: List of placeholder tensors.
         """
         return [
-            tf.placeholder(tf.float32, name='learning_rate'),
-            tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training')
+            tf.placeholder(tf.float32, shape=(), name='learning_rate'),
+            tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training'),
+            tf.placeholder(tf.int32, shape=(), name=self._worker_batch_size_placeholder_name),
         ]
 
     @abc.abstractmethod
-    def _placeholders(self) -> nn_types.Tensors:
+    def _placeholders(self) -> typing.Sequence[typing.Union[tf.Tensor, QueuePlaceholder]]:
         """
         Placeholders defined by the user.
         Side effect: Populates self.graph.
 
-        :return: List of placeholder tensors.
+        :return: List of placeholder tensors or QueuePlaceholder objects.
         """
         return
 
@@ -435,7 +676,7 @@ class NNModel(metaclass=abc.ABCMeta):
         # TODO(daeyun): Make this a private method. Or refactor initialization logic.
         with self.graph.as_default():
             with self.session.as_default():
-                self.saver = tf.train.import_meta_graph(restore_path + self._meta_graph_suffix)
+                self.saver = tf.train.import_meta_graph(restore_path + NNModel._meta_graph_suffix)
                 self.saver.restore(tf.get_default_session(), restore_path)
                 log.info("Restored model from %s", restore_path)
                 self.needs_variable_initialization = False
@@ -458,7 +699,7 @@ class NNModel(metaclass=abc.ABCMeta):
             os.makedirs(dirpath)
 
         with self.graph.as_default():
-            self.saver.export_meta_graph(save_path + self._meta_graph_suffix, as_text=True)
+            self.saver.export_meta_graph(save_path + NNModel._meta_graph_suffix, as_text=True)
             save_path_out = self.saver.save(self.session, save_path, write_meta_graph=False)
             log.info("Model saved to file: %s" % save_path_out)
 
@@ -475,24 +716,24 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @tc.typecheck
     def eval(self,
-             values_or_patterns: tc.optional(tc.seq_of(tc.any(nn_types.Value, str))) = None,
+             values_or_patterns: tc.optional(tc.any(tc.any(nn_types.Value, str), tc.seq_of(tc.any(nn_types.Value, str)))) = None,
              feed_dict: tc.optional(dict) = None,
              collection_keys: tc.optional(tc.seq_of(str)) = None,
              summary_modes: tc.optional(tc.seq_of(str)) = None,
              summary_writer_name: tc.optional(str) = None,
-             is_training: bool = False) -> dict:
+             is_training: bool = False):
         """
         Evaluates TensorFlow Operations.
 
         :param values_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
-        also be regex patterns. Must be a list.
+        also be regex patterns. Can be a list or single value.
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
         :param collection_keys: All values in the given collections will be added to `fetches`.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         :param summary_writer_name: If None, default is 'train' if `is_training` is True, 'eval' otherwise.
         If this is a new name, a summary writer will be created.
-        :param is_training: If true, executes a training step.
+        :param is_training: If `True`, executes a training step.
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
         assert not self.needs_variable_initialization, 'Variables are not initialized.'
@@ -508,6 +749,10 @@ class NNModel(metaclass=abc.ABCMeta):
             if len(summary_modes) == 0:
                 # TODO(daeyun): Log only once.
                 log.warn('Non-default empty `summary_modes`. This was probably not expected.')
+
+        is_single_value = isinstance(values_or_patterns, (tf.Tensor, tf.Variable, tf.Operation, str))
+        if is_single_value:
+            values_or_patterns = [values_or_patterns]
 
         # TODO(daeyun): If is_training is false and `fetches` contains an op that updates variables, e.g. minimizer, raise exception.
 
@@ -529,7 +774,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 try:
                     fetches.append(self[item])
                 except:
-                    raise ValueError('Unidentifiable pattern: {}'.format_map(item))
+                    raise ValueError('Unidentifiable pattern: {}'.format(item))
             else:
                 fetches.append(item)
 
@@ -583,12 +828,15 @@ class NNModel(metaclass=abc.ABCMeta):
             # TODO(daeyun): Listen for a keypress event to signal flush.
             writer.flush()
 
-        # `tensors_or_patterns` and `out_eval` may not be the same size.
-        results = {}
-        for name, result in zip(values_or_patterns, out_eval):
-            if result is not None:
-                results[name] = result
-        return results
+        if is_single_value:
+            return out_eval[0]
+        else:
+            # `tensors_or_patterns` and `out_eval` may not be the same size.
+            results = {}
+            for name, result in zip(values_or_patterns, out_eval):
+                if result is not None:
+                    results[name] = result
+            return results
 
     @tc.typecheck
     def __getitem__(self, pattern: str) -> nn_types.ValueOrOperation:
@@ -637,26 +885,24 @@ class NNModel(metaclass=abc.ABCMeta):
     @tc.typecheck
     def all_values(self) -> nn_types.ValuesOrOperations:
         """
-        Returns all TensorFlow Variables or Operations defined in the graph.
+        Returns all TensorFlow Operations or Tensors defined in the graph.
 
         :return: All variables and operations in the graph.
         """
         unique = {}
-        for value in self.ops:
+        for value in self.variables:
+            unique[value.name] = value
+
+        for value in self.graph.get_operations():
             unique[value.name] = value
 
         # Includes placeholders.
+        # NOTE: Tensors and Variables can have the same name. Tensors should have higher priority.
         for op in self.graph.get_operations():
             for value in op.outputs:
                 unique[value.name] = value
 
-        for value in self.activations:
-            unique[value.name] = value
-
-        for value in self.variables:
-            unique[value.name] = value
-
-        return list(unique.values())
+        return list(zip(*sorted(list(unique.items()))))[1]
 
     @memoize
     @tc.typecheck
@@ -684,9 +930,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @memoize
     @tc.typecheck
-    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None) -> nn_types.ValueOrOperation:
+    def get_all(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None):
         """
-        Returns a variable or tensor whose name uniquely matches the pattern. If `pattern` is not
+        Returns a list of tensors or operations whose name matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
 
         :param pattern: A regular expression pattern.
@@ -695,15 +941,67 @@ class NNModel(metaclass=abc.ABCMeta):
         :return: Matched variable or tensor.
         :raises ValueError: If pattern matches more than one item.
         """
-        matched = match_names(self.all_values, pattern, prefix=prefix, suffix=suffix)
-        if len(matched) != 1:
+        all_values = self.all_values
+        matched, final_pattern = match_names(all_values, pattern, prefix=prefix, suffix=suffix,
+                                             return_final_pattern=True)
+
+        # Base cases.
+        if len(matched) == 0:
+            raise ValueError('Error: pattern {} did not match any values in the graph.'.format(final_pattern))
+
+        return matched
+
+    @memoize
+    @tc.typecheck
+    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None) -> nn_types.ValueOrOperation:
+        """
+        Returns a tensor or operation whose name uniquely matches the pattern. If `pattern` is not
+        found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
+
+        :param pattern: A regular expression pattern.
+        :param prefix: A string prepended to `pattern`. Defaults to ``(?:^|.*/)``.
+        :param suffix: A string appended to `pattern`. Defaults to ``(?:/.*|$)`.
+        :return: Matched variable or tensor.
+        :raises ValueError: If pattern matches more than one item.
+        """
+        all_values = self.all_values
+        all_values_by_name = {item.name: item for item in all_values}
+
+        if prefix is None and suffix is None:
+            # If the name contains ':', i.e. a tensor or variable, check if there is an exact match.
+            if ':' in pattern:
+                if pattern in all_values_by_name:
+                    value = all_values_by_name[pattern]
+                    if isinstance(value, tf.Tensor):
+                        return value
+
+            else:
+                # Check if `pattern` is a placeholder name.
+                try:
+                    return self.get('{}/{}:0'.format(NNModel._placeholder_prefix, pattern), prefix=None, suffix=None)
+                except ValueError:
+                    pass
+
+        # Check if appending ':[0-9]+?$' works. If it does, give it priority.
+        if '$' not in pattern and suffix is None:
             try:
-                assert not pattern.endswith(r':0$')
-                return self.get(pattern + r':0$', prefix=prefix, suffix='')
-            except Exception as ex:
-                raise ValueError('len(matched) = {}\npattern: {} {} {}\nmatched:\n{}'.format(
-                    len(matched), prefix, pattern, suffix, '\n'.join([item.name for item in matched])))
-        return matched[0]
+                return self.get(pattern, prefix=prefix, suffix=':[0-9]+?$')
+            except ValueError:
+                pass
+
+        matched, final_pattern = match_names(all_values, pattern,
+                                             prefix=prefix, suffix=suffix, return_final_pattern=True)
+
+        # Base cases.
+        if len(matched) == 1:
+            # Check if there is a value whose name uniquely matches the regex '{prefix}{pattern}{suffix}'.
+            return matched[0]
+
+        if len(matched) == 0:
+            raise ValueError('Error: pattern {} did not match any values in the graph.'.format(final_pattern))
+
+        raise ValueError('Error: pattern {} matches multiple values ({} total):\n{}'.format(
+            final_pattern, len(matched), '\n'.join([item.name for item in matched])))
 
     @memoize
     @tc.typecheck
@@ -741,7 +1039,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :return: The global step value.
         """
-        return tf.train.global_step(self.session, self['train/global_step'])
+        return tf.train.global_step(self.session, self['{}:0$'.format(NNModel._global_step_variable_name)])
 
     @tc.typecheck
     def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.train.SummaryWriter:

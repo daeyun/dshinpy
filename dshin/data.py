@@ -9,6 +9,9 @@ import signal
 from os import path
 
 import ensure
+import math
+import time
+import abc
 import numpy as np
 import peewee
 
@@ -38,7 +41,7 @@ class AsyncArrayLoader(object):
     @ensure.ensure_annotations
     def __init__(self, pool_size=16, loader_func: typing.Callable = _load_npz):
         """
-        An object that asynchronously loads arrays from files and returns a concatenated array.
+        Loads arrays from files concurrently and returns a concatenated array.
 
         :param pool_size: Number of workers.
         :param loader_func: A function that takes a filename and returns an array.
@@ -81,17 +84,18 @@ class AsyncArrayLoader(object):
 
 
 class QueryPaginator(object):
-    @ensure.ensure_annotations
     def __init__(self, query: peewee.SelectQuery):
         """
-        Wrapper for reading Peewee ORM query results in batches.
+        Wrapper for reading select query results in batches.
 
         :param query: peewee.SelectQuery returning dicts or Models.
         """
+        assert isinstance(query, peewee.SelectQuery)
+
         self.query = query.clone()
         self.count = query.count()
         self.current_row = 0
-        self.iterations = 0
+        self.current_iteration = 0
         ensure.check(True)
 
     def _reset_iteration(self):
@@ -103,7 +107,7 @@ class QueryPaginator(object):
         if count != self.count:
             log.warn('Row count changed from %d to %d', self.count, count)
         self.count = count
-        self.iterations += 1
+        self.current_iteration += 1
         self.current_row = 0
 
     @ensure.ensure_annotations
@@ -121,4 +125,124 @@ class QueryPaginator(object):
             self._reset_iteration()
 
         self.current_row += len(items)
+
         return items
+
+
+class DataSource(object):
+    def __init__(self, query_dict):
+        """
+        Manages multiple `QueryPaginator` instances and supports continuous batching.
+
+        :param query_dict: Nested dict (key1 -> (key2 -> (... -> query))) where `query` is a `peewee.SelectQuery`.
+        `key=(key1, key2, ...)` can be used to operate on the corresponding query.
+        Queries will be in `.dicts()` mode (if not already set).
+        """
+        self.query = query_dict
+        self._paginator = self._assign_paginators_recursive(self.query)
+
+    def _assign_paginators_recursive(self, query):
+        if not isinstance(query, dict):
+            return QueryPaginator(query.dicts())
+        out = {}
+        for k, v in query.items():
+            out[k] = self._assign_paginators_recursive(v)
+        return out
+
+    def paginator(self, key):
+        """
+        `QueryPaginator` corresponding to `self.query[key1][key2][...]` given `key=(key1, key2, ...)`.
+
+        :param key: Query key. e.g. ('test', 'novelview')
+        :return: The corresponding `QueryPaginator` object.
+        """
+        paginator = self._paginator
+        assert isinstance(key, tuple) or isinstance(key, list)
+        for key in key:
+            paginator = paginator[key]
+        assert isinstance(paginator, QueryPaginator)
+        return paginator
+
+    def count(self, key) -> int:
+        """
+        Total number of items for the given key.
+
+        :param key: Query key. e.g. ['train'], ['test', 'novelview']
+        :return: Total number of items.
+        """
+        return self.paginator(key).count
+
+    def current_iteration_count(self, key) -> int:
+        """
+        Epoch number for the next batch. Initially 0.
+
+        :param key: Query key.
+        :return: Epoch and row number for the next batch.
+        """
+        return self.paginator(key).current_iteration
+
+    def current_row_count(self, key) -> int:
+        """
+        Row number for the next batch. Initially 0.
+
+        :param key: Query key.
+        :return: Epoch and row number for the next batch.
+        """
+        return self.paginator(key).current_row
+
+    @ensure.ensure_annotations
+    def batch_count(self, batch_size: int, key: typing.Sequence[str]) -> int:
+        """
+        Total number of batches per iteration.
+        :param key: Query key. e.g. ['train'], ['test', 'novelview']
+        :return: Total number of batches.
+        """
+        return int(math.ceil(self.count(key=key) / batch_size))
+
+    def next(self, key, batch_size=1):
+        start_time = time.time()
+        out = self._next(key=key, batch_size=batch_size)
+
+        elapsed = time.time() - start_time
+        if elapsed > 0.1 and self.current_row_count(key) > 1:
+            log.warn('Query is taking too long: %.3f', elapsed)
+
+        return out
+
+    def _next(self, key, batch_size=1, is_seamless=True):
+        """
+        Returns the next batch. If `is_seamless` is False, returns ``None`` after each iteration.
+
+        :param batch_size: Number of batches.
+        :param key: Query key. e.g. ['train'], ['test', 'novelview']
+        :return: A list of dicts. Batch size may be smaller than `batch_size` if `is_seamless` is False and
+        this is the last batch of the iteration.
+        """
+        paginator = self.paginator(key)
+        assert paginator.count > 0
+
+        rows = paginator.next(batch_size)
+
+        if is_seamless:
+            if self.current_row_count(key=key) == self.count(key=key):
+                # len==0 indicates end of one iteration.
+                # This resets current_row and current_iteration.
+                assert len(paginator.next(batch_size)) == 0
+
+            if len(rows) < batch_size:
+                rows.extend(paginator.next(batch_size - len(rows)))
+
+        elif len(rows) == 0:
+            # Indicates end of one iteration.
+            return None
+
+        return [self._post_process(r) for r in rows]
+
+    def _post_process(self, row_dict):
+        """
+        Can be implemented by the user.
+
+        :param row_dict: A dict that corresponds to a single row.
+        :return: Same as `row_dict`, by default.
+        """
+        return row_dict
