@@ -10,5 +10,6 @@ zlib
 scipy
 psutil
 pytest
+pytest-timeout
 sphinx
 ipython

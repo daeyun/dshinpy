@@ -77,8 +77,8 @@ def match_names(values: nn_types.ValuesOrOperations,
 
     :param values: A list of Variables, Tensors, or Operations.
     :param pattern: A regular expression pattern.
-    :param prefix: A string prepended to `pattern`. Defaults to ``(?:^|.*/)``.
-    :param suffix: A string appended to `pattern`. Defaults to ``(?:/.*|$)`.
+    :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
+    :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
     :param return_final_pattern: If `True`, return a tuple (list of matched values, regex pattern).
     :return: A list of matched graph objects. And optionally the regex pattern used for the search.
     """
@@ -88,12 +88,12 @@ def match_names(values: nn_types.ValuesOrOperations,
         if pattern.startswith('^'):
             prefix = ''
         else:
-            prefix = r'(?:^|.*/)'
+            prefix = r'^(.*/)?'
     if suffix is None:
         if pattern.endswith('$'):
             suffix = ''
         else:
-            suffix = r'(?:/.*|$)'
+            suffix = r'(/.*)?$'
 
     final_pattern = ''.join([prefix, pattern, suffix])
     matched = []
@@ -104,6 +104,56 @@ def match_names(values: nn_types.ValuesOrOperations,
     if return_final_pattern:
         return matched, final_pattern
     return matched
+
+
+def ensure_list_or_tuple(value_or_values):
+    if isinstance(value_or_values, (list, tuple)):
+        return value_or_values
+    return tuple(value_or_values)
+
+
+import functools
+
+
+@functools.lru_cache()
+def _check_placeholder_queue_coverage(placeholders: frozenset, return_missing=False):
+    assert isinstance(placeholders, frozenset)
+    queue_placeholders = {}
+    for placeholder in placeholders:
+        assert isinstance(placeholder, tf.Tensor)
+        if 'placeholderwithdefault' in placeholder.op.type.lower():
+            for queue_output in placeholder.op.inputs:
+                if 'dequeue' in queue_output.op.type.lower():
+                    names = []
+                    for output in queue_output.op.outputs:
+                        for placeholder_op in output.consumers():
+                            if placeholder_op.type == placeholder.op.type:
+                                for value in placeholder_op.outputs:
+                                    if type(value) == type(queue_output):
+                                        names.append(value.name)
+                                        queue_placeholders[value.name] = value
+                    if names:
+                        # Sanity check. Making sure `all_names` includes input names.
+                        assert placeholder.name in names
+
+    all_names = frozenset(queue_placeholders.keys())
+    names = frozenset(item.name for item in placeholders)
+    missing = all_names - names
+
+    if return_missing:
+        return len(missing) == 0, missing
+    return len(missing) == 0
+
+
+def check_feed_queue_coverage(feed_dict):
+    optional_placeholders = frozenset(filter(lambda x: 'placeholderwithdefault' in x.op.type.lower(),
+                                             feed_dict.keys()))
+    is_complete, missing = _check_placeholder_queue_coverage(optional_placeholders, True)
+    if not is_complete:
+        input_names = '\n'.join([k.name for k in feed_dict.keys()])
+        missing_names = '\n'.join([name for name in missing])
+        raise ValueError(('Error: Incomplete list of optional placeholders.\n'
+                          'Given:\n{}\n\nMissing:\n{}').format(input_names, missing_names))
 
 
 @tc.typecheck
@@ -167,25 +217,25 @@ class NNModel(metaclass=abc.ABCMeta):
     ...              'target': np.random.randn(2, 5, 5, 1),
     ...              'learning_rate': 0.001}
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.26110
+    1.55977
     >>> net.train(feed_dict)
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.25654
+    1.55425
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.25654
+    1.55425
 
     Save and restore:
 
     >>> net.save('/tmp/sample_net/saved')
     >>> net_restored = SampleNet.from_file('/tmp/sample_net/saved')
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.25654
+    1.55425
     >>> net.train(feed_dict)
     >>> net_restored.train(feed_dict)
     >>> print('{0:.5f}'.format(net_restored.eval(['loss'], feed_dict)['loss']))
-    1.25199
+    1.54875
     >>> print('{0:.5f}'.format(net.eval(['loss'], feed_dict)['loss']))
-    1.25199
+    1.54875
     """
 
     _placeholder_prefix = 'placeholder'
@@ -288,8 +338,6 @@ class NNModel(metaclass=abc.ABCMeta):
             self._build_model()  # Also initializes variables.
             self._init_summaries()  # Sets self._summary_ops
 
-        # TODO(daeyun)
-        graph.save_graph_text_summary(self.graph)
         self.queue_runner_threads = self._run_queue_runners()
 
     def _run_queue_runners(self):
@@ -439,7 +487,7 @@ class NNModel(metaclass=abc.ABCMeta):
         for name, value in dequeue_tensors.items():
             input_spec = input_specs_by_name[name]
             if input_spec.is_file:
-                # In a distributed setting, this should happen on the worker's device.
+                # This should happen on the worker's device.
                 value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=input_spec.shape[1:])
             else:
                 # Sanity check.
@@ -704,15 +752,41 @@ class NNModel(metaclass=abc.ABCMeta):
             log.info("Model saved to file: %s" % save_path_out)
 
     @tc.typecheck
-    def train(self, feed_dict: dict, summary_modes: tc.optional(tc.any(str, tc.seq_of(str))) = None):
+    def train(self,
+              feed_dict: dict,
+              summary_modes: tc.optional(tc.any(str, tc.seq_of(str))) = None,
+              check_queue_coverage=True):
         """
         Runs a training step.
 
         :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
         or placeholder objects.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
+        :param check_queue_coverage: If `True`, raise an exception when `feed` contains an optional placeholder
+        and there are any remaining optional placeholders that depend on the same queue.
         """
         self.eval([], feed_dict=feed_dict, is_training=True, summary_modes=summary_modes)
+
+    @tc.typecheck
+    def enqueue(self, feed_dict: dict):
+        new_feed_dict = {}
+        for k, v in feed_dict.items():
+            if isinstance(k, str):
+                if not k.startswith(NNModel._producer_queue_prefix):
+                    k = '{}/{}/{}'.format(NNModel._placeholder_prefix, NNModel._producer_queue_prefix, k)
+                new_feed_dict[self[k]] = v
+            elif isinstance(k, tf.Tensor):
+                new_feed_dict[k] = v
+            else:
+                raise ValueError('Unexpected key in feed_dict: {}'.format(k))
+
+        for k, v in new_feed_dict.items():
+            assert isinstance(k, tf.Tensor)
+            assert k.name.startswith('{}/{}'.format(NNModel._placeholder_prefix, NNModel._producer_queue_prefix))
+
+        enqueue_op = self['{}/enqueue'.format(NNModel._producer_queue_prefix)]
+        assert isinstance(enqueue_op, tf.Operation)
+        self.session.run(enqueue_op, feed_dict=new_feed_dict)
 
     @tc.typecheck
     def eval(self,
@@ -721,7 +795,8 @@ class NNModel(metaclass=abc.ABCMeta):
              collection_keys: tc.optional(tc.seq_of(str)) = None,
              summary_modes: tc.optional(tc.seq_of(str)) = None,
              summary_writer_name: tc.optional(str) = None,
-             is_training: bool = False):
+             is_training: bool = False,
+             check_optional_placeholder_coverage=True):
         """
         Evaluates TensorFlow Operations.
 
@@ -734,6 +809,8 @@ class NNModel(metaclass=abc.ABCMeta):
         :param summary_writer_name: If None, default is 'train' if `is_training` is True, 'eval' otherwise.
         If this is a new name, a summary writer will be created.
         :param is_training: If `True`, executes a training step.
+        :param check_queue_coverage: If `True`, raise an exception when `feed` contains an optional placeholder
+        and there are any remaining optional placeholders that depend on the same queue.
         :return: A dictionary that maps `tensors_or_patterns` to evaluated values.
         """
         assert not self.needs_variable_initialization, 'Variables are not initialized.'
@@ -809,6 +886,9 @@ class NNModel(metaclass=abc.ABCMeta):
             fetches.extend(summary_ops)
 
         assert len(fetches) > 0, '`fetches` cannot be empty.'
+
+        if check_optional_placeholder_coverage:
+            check_feed_queue_coverage(new_feed_dict)
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
@@ -936,8 +1016,8 @@ class NNModel(metaclass=abc.ABCMeta):
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
 
         :param pattern: A regular expression pattern.
-        :param prefix: Prefix for `pattern`. Defaults to ``.*?``.
-        :param suffix: Suffix for `pattern`. Defaults to ``.*?``.
+        :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
+        :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
         :return: Matched variable or tensor.
         :raises ValueError: If pattern matches more than one item.
         """
@@ -959,8 +1039,8 @@ class NNModel(metaclass=abc.ABCMeta):
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
 
         :param pattern: A regular expression pattern.
-        :param prefix: A string prepended to `pattern`. Defaults to ``(?:^|.*/)``.
-        :param suffix: A string appended to `pattern`. Defaults to ``(?:/.*|$)`.
+        :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
+        :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
         :return: Matched variable or tensor.
         :raises ValueError: If pattern matches more than one item.
         """

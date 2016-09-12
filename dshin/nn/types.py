@@ -11,3 +11,7 @@ ValuesOrOperations = tc.seq_of(ValueOrOperation)
 Tensors = tc.seq_of(tf.Tensor)
 Variables = tc.seq_of(tf.Variable)
 Operations = tc.seq_of(tf.Operation)
+
+
+def single_or_seq_of(t):
+    return tc.any(t, tc.seq_of(t))

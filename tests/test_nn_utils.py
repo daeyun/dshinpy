@@ -38,6 +38,42 @@ def data():
     }
 
 
+def test_get_tensor_by_regex(bn_net: nn.utils.NNModel, data):
+    net = bn_net
+
+    assert net['input'].name == 'placeholder/input:0'
+    assert net['placeholder/input'].name == 'placeholder/input:0'
+    assert net['placeholder/input:0'].name == 'placeholder/input:0'
+    assert net['placeholder/input:0'].name == 'placeholder/input:0'
+    assert net.get('input', prefix='.*', suffix=':0').name == 'placeholder/input:0'
+    assert net.get('input', prefix='placeholder/', suffix=':0').name == 'placeholder/input:0'
+    assert net.get('input').name == 'placeholder/input:0'
+    assert net.get('input', prefix='placeholder/').name == 'placeholder/input:0'
+    assert net.get('input', prefix='placeholder/', suffix='$').name == 'placeholder/input'
+    assert net.get('input$', prefix='placeholder/').name == 'placeholder/input'
+    assert net.get('input$').name == 'placeholder/input'
+    assert net['input$'].name == 'placeholder/input'
+    assert isinstance(net['input$'], tf.Operation)
+    assert net['.*input:0'].name == 'placeholder/input:0'
+
+    with pytest.raises(Exception):
+        assert net['inpu']
+    with pytest.raises(Exception):
+        assert net['nput']
+    with pytest.raises(Exception):
+        assert net['pla']
+    with pytest.raises(Exception):
+        assert net['placeholder/inpu']
+    with pytest.raises(Exception):
+        assert net['laceholder/inpu']
+    with pytest.raises(Exception):
+        assert net['placeholder/input:']
+    with pytest.raises(Exception):
+        assert net['placeholder/input:1']
+    with pytest.raises(Exception):
+        assert net.get('.*input(:0)?', suffix='')
+
+
 def test_train_bn(bn_net: nn.utils.NNModel, data):
     net = bn_net
     train_feed_dict = {
