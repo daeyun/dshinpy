@@ -1033,7 +1033,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
     @memoize
     @tc.typecheck
-    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None) -> nn_types.ValueOrOperation:
+    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None,
+            save_text_summary_on_error=True) -> nn_types.ValueOrOperation:
         """
         Returns a tensor or operation whose name uniquely matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
@@ -1041,6 +1042,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param pattern: A regular expression pattern.
         :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
         :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
+        :param save_text_summary_on_error: If `True`, write a text summary of objects in the graph on error.
         :return: Matched variable or tensor.
         :raises ValueError: If pattern matches more than one item.
         """
@@ -1058,14 +1060,15 @@ class NNModel(metaclass=abc.ABCMeta):
             else:
                 # Check if `pattern` is a placeholder name.
                 try:
-                    return self.get('{}/{}:0'.format(NNModel._placeholder_prefix, pattern), prefix=None, suffix=None)
+                    return self.get('{}/{}:0'.format(NNModel._placeholder_prefix, pattern), prefix=None, suffix=None,
+                                    save_text_summary_on_error=False)
                 except ValueError:
                     pass
 
         # Check if appending ':[0-9]+?$' works. If it does, give it priority.
         if '$' not in pattern and suffix is None:
             try:
-                return self.get(pattern, prefix=prefix, suffix=':[0-9]+?$')
+                return self.get(pattern, prefix=prefix, suffix=':[0-9]+?$', save_text_summary_on_error=False)
             except ValueError:
                 pass
 
@@ -1076,6 +1079,12 @@ class NNModel(metaclass=abc.ABCMeta):
         if len(matched) == 1:
             # Check if there is a value whose name uniquely matches the regex '{prefix}{pattern}{suffix}'.
             return matched[0]
+
+        if save_text_summary_on_error:
+            if self.summary_dir is not None:
+                graph.save_graph_text_summary(self.graph, dirname=self.summary_dir)
+            else:
+                graph.save_graph_text_summary(self.graph)
 
         if len(matched) == 0:
             raise ValueError('Error: pattern {} did not match any values in the graph.'.format(final_pattern))

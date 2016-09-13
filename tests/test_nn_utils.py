@@ -244,3 +244,34 @@ def test_save_and_restore_placeholders(bn_net: nn.utils.NNModel, tmpdir: local.L
     assert isinstance(bn_net['placeholder/target'], tf.Tensor)
     assert isinstance(bn_net['input'], tf.Tensor)
     assert isinstance(bn_net['target'], tf.Tensor)
+
+
+def test_get_error_save_summary(bn_net: nn.utils.NNModel, tmpdir: local.LocalPath, data):
+    net = bn_net
+    assert not path.isfile(path.join(net.summary_dir, 'graph_summary.txt'))
+    with pytest.raises(Exception):
+        net['non_existant_key_392']
+    assert path.isfile(path.join(net.summary_dir, 'graph_summary.txt'))
+
+
+class Add(nn.utils.NNModel):
+    def _model(self):
+        tf.assign(self['global_step'], self['global_step'] + 1, name='add_assign')
+
+    def _minimize_op(self):
+        return tf.no_op()
+
+    def _placeholders(self):
+        return []
+
+
+@pytest.fixture(scope='function')
+def add_net():
+    return Add(seed=42)
+
+
+def test_eval_op(add_net: nn.utils.NNModel):
+    net = add_net
+    assert net.eval('global_step') == 0
+    assert net.eval('add_assign$') is None
+    assert net.eval('global_step') == 1
