@@ -112,9 +112,6 @@ def ensure_list_or_tuple(value_or_values):
     return tuple(value_or_values)
 
 
-import functools
-
-
 @functools.lru_cache()
 def _check_placeholder_queue_coverage(placeholders: frozenset, return_missing=False):
     assert isinstance(placeholders, frozenset)
