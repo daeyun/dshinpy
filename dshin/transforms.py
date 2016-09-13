@@ -102,10 +102,13 @@ def rotation_matrix(angle, direction, point=None, deg=True):
     """
     http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
     """
+    if np.isclose(angle, 0.0):
+        return np.eye(4)
     if deg:
         angle = math.pi * angle / 180
     sina = math.sin(angle)
     cosa = math.cos(angle)
+    direction = direction.astype(np.float32)
     direction /= la.norm(direction, 2)
     # rotation matrix around unit vector
     R = numpy.diag([cosa, cosa, cosa])
@@ -130,8 +133,11 @@ def angle(v1, v2, axis=0, deg=False, ref_plane=None):
     :param deg: Returns angle in degrees if True, radians if False.
     :param ref_plane: If set, returns a signed angle for right-handed rotation with respect to this plane.
     """
-    v1 = v1 / la.norm(v1, ord=2, axis=axis, keepdims=True)
-    v2 = v2 / la.norm(v2, ord=2, axis=axis, keepdims=True)
+    v1n = la.norm(v1, ord=2, axis=axis, keepdims=True)
+    v1 = v1 / v1n
+
+    v2n = la.norm(v2, ord=2, axis=axis, keepdims=True)
+    v2 = v2 / v2n
 
     # More numerically stable than arccos.
     dotprod = (v1 * v2).sum(axis=axis)

@@ -149,6 +149,11 @@ def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
 
 
 def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None):
+    if type(start_pts) != np.ndarray:
+        start_pts = np.array(start_pts)
+    if type(end_pts) != np.ndarray:
+        end_pts = np.array(end_pts)
+
     if ax is None:
         fig = pt.figure()
         ax = fig.gca(projection='3d')
@@ -160,6 +165,22 @@ def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None):
                                                                     np.ndarray) else colors
         text = texts[i] if isinstance(texts, list) else None
         draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text)
+    return ax
+
+
+def draw_xyz_axes():
+    start_pts = np.zeros([3, 3])
+    end_pts = np.eye(3)
+    ax = draw_arrow_3d(start_pts, end_pts, texts=['x', 'y', 'z'], colors=['r', 'g', 'b'])
+    ax.set_aspect('equal')
+
+    bmin = [-1,-1,-1]
+    bmax = [1,1,1]
+    ax.set_xlim([bmin[0], bmax[0]])
+    ax.set_ylim([bmin[1], bmax[1]])
+    ax.set_zlim([bmin[2], bmax[2]])
+
+    return ax
 
 
 def draw_camera(Rt, ax=None, scale=10):
