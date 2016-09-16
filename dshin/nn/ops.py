@@ -27,10 +27,10 @@ def layer(func):
 
 
 @tc.typecheck
-def _variable_on_cpu(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
-    with tf.device('/cpu:0'):
-        dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
-        return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
+def _get_variable(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
+    # with tf.device('/cpu:0'):
+    dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
+    return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
 
 
 @layer
@@ -47,13 +47,13 @@ def conv2d(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / ((k ** 2) * n_in))
-        w = _variable_on_cpu('w', [k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
+        w = _get_variable('w', [k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
         conv = tf.nn.conv2d(input_tensor, w, strides=[1, s, s, 1], padding=padding, use_cudnn_on_gpu=True)
 
         if not use_bias:
             return conv
 
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(conv, b)
 
 
@@ -72,7 +72,7 @@ def deconv2d(input_tensor: nn_types.Value,
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
         stddev = math.sqrt(2.0 / ((k ** 2) / (s ** 2) * n_in))
-        w = _variable_on_cpu('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_variable('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -91,7 +91,7 @@ def deconv2d(input_tensor: nn_types.Value,
         if not use_bias:
             return deconv
 
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(deconv, b)
 
 
@@ -109,13 +109,13 @@ def conv3d(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / ((k ** 3) * n_in))
-        w = _variable_on_cpu('w', [k, k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
+        w = _get_variable('w', [k, k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
         conv = tf.nn.conv3d(input_tensor, w, strides=[1, s, s, s, 1], padding=padding)
 
         if not use_bias:
             return conv
 
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(conv, b)
 
 
@@ -134,7 +134,7 @@ def deconv3d(input_tensor: nn_types.Value,
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
         stddev = math.sqrt(2.0 / ((k ** 3) / (s ** 3) * n_in))
-        w = _variable_on_cpu('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_variable('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -152,7 +152,7 @@ def deconv3d(input_tensor: nn_types.Value,
         if not use_bias:
             return deconv
 
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(deconv, b)
 
 
@@ -168,13 +168,13 @@ def linear(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / n_in)
-        w = _variable_on_cpu('w', [n_in, n_out], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_variable('w', [n_in, n_out], initializer=tf.random_normal_initializer(stddev=stddev))
         lin = tf.matmul(input_tensor, w)
 
         if not use_bias:
             return lin
 
-        b = _variable_on_cpu('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(lin, b)
 
 
@@ -263,7 +263,7 @@ def ema_with_initial_value(value: nn_types.Value,
         else:
             shape = value.get_shape().as_list()
             init = tf.constant_initializer(initial_value, dtype=value.dtype)
-            value_copy = _variable_on_cpu('value_copy', shape=shape, initializer=init, trainable=False)
+            value_copy = _get_variable('value_copy', shape=shape, initializer=init, trainable=False)
             with tf.control_dependencies([tf.assign(value_copy, value)]):
                 apply_op = ema_trainer.apply([value_copy])
                 moving_average = ema_trainer.average(value_copy)
@@ -288,7 +288,7 @@ def ema_with_update_dependencies(values: nn_types.Value, initial_values: float =
         for value, initial_value in zip(values, initial_values):
             shape = value.get_shape().as_list()
             init = tf.constant_initializer(initial_value)
-            value_copy = _variable_on_cpu(value.name + ':ema', shape=shape, initializer=init, trainable=False)
+            value_copy = _get_variable(value.name + ':ema', shape=shape, initializer=init, trainable=False)
             assign_ops.append(tf.assign(value_copy, value))
             ema_variables.append(value_copy)
 
@@ -347,8 +347,8 @@ def batch_norm(value: nn_types.Value,
 
     n_out = shape[-1]
     with tf.variable_scope(name):
-        beta = _variable_on_cpu('beta', shape=[n_out], initializer=tf.constant_initializer(offset), trainable=is_trainable)
-        gamma = _variable_on_cpu('gamma', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
+        beta = _get_variable('beta', shape=[n_out], initializer=tf.constant_initializer(offset), trainable=is_trainable)
+        gamma = _get_variable('gamma', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
 
         batch_mean, batch_var = tf.nn.moments(value, axes, name='moments')
         batch_var = tf.maximum(batch_var, 0.0)

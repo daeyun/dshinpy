@@ -48,7 +48,7 @@ class IPythonTfGraph(object):
 
     def show(self, graph_or_graph_def=None, max_const_size=32):
         """
-        Visualize TensorFlow graph.
+        Visualize TensorFlow g.
         """
         if graph_or_graph_def is None:
             graph_or_graph_def = self.graph
@@ -63,11 +63,11 @@ class IPythonTfGraph(object):
                 document.getElementById("{id}").pbtxt = {data};
               }}
             </script>
-            <link rel="import" href="https://tensorboard.appspot.com/tf-graph-basic.build.html" onload=load()>
+            <link rel="import" href="https://tensorboard.appspot.com/tf-g-basic.build.html" onload=load()>
             <div style="height:600px">
-              <tf-graph-basic id="{id}"></tf-graph-basic>
+              <tf-g-basic id="{id}"></tf-g-basic>
             </div>
-        """.format(data=repr(str(strip_def)), id='graph' + str(np.random.rand()))
+        """.format(data=repr(str(strip_def)), id='g' + str(np.random.rand()))
         code = textwrap.dedent(code)
 
         iframe = """<iframe seamless style="width:800px;height:620px;border:0" srcdoc="{}"></iframe>""".format(code.replace('"', '&quot;'))
@@ -172,6 +172,23 @@ def abs_name_scope(name):
         yield scope
 
 
+def job_info_from_server(server):
+    for job in server.server_def.cluster.job:
+        if job.name == server.server_def.job_name:
+            tasks = list(zip(*sorted([(k, v) for k, v in job.tasks.items()])))[1]
+            return job.name, tasks
+    raise RuntimeError('Unable to parse job info.')
+
+
+def task_id_from_server(server):
+    name, tasks = job_info_from_server(server)
+    for task_id, host in enumerate(tasks):
+        target = server.target.decode('utf-8')
+        if host.replace('127.0.0.1', 'localhost') in target.replace('127.0.0.1', 'localhost'):
+            return task_id
+    raise RuntimeError('Unable to parse task id.')
+
+
 def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False, basename='graph_summary.txt'):
     if dirname is None:
         dirname = '/tmp/nn_logs'
@@ -187,6 +204,7 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
             if not d:
                 return '-'
             return value.device
+
         return func
 
     def summary_items(value):
@@ -285,7 +303,7 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
         by_operation.append(section)
 
     content = textwrap.dedent('''
-    By graph collection keys:
+    By g collection keys:
     -----------------------------------
     {by_graph_key}
 
@@ -299,5 +317,5 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
     with open(filename, 'w') as f:
         f.write(content)
 
-    log.info('Wrote graph text summary: {}'.format(filename))
+    log.info('Wrote g text summary: {}'.format(filename))
     return filename

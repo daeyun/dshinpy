@@ -11,11 +11,9 @@ from dshin import nn
 class BNOnly(nn.utils.NNModel):
     def _model(self):
         out = nn.ops.batch_norm(self['input'], is_trainable=True, is_local=True)
-        self._loss = tf.reduce_mean((out - self['target']) ** 2, name='loss')
-        tf.scalar_summary('loss', self._loss, collections=nn.utils.NNModel.summary_keys('SIMPLE'))
-
-    def _minimize_op(self):
-        return tf.train.AdamOptimizer(self['learning_rate']).minimize(self._loss)
+        loss = tf.reduce_mean((out - self['target']) ** 2, name='loss')
+        tf.scalar_summary('loss', loss, collections=nn.utils.NNModel.summary_keys('SIMPLE'))
+        return loss
 
     def _placeholders(self):
         return [
@@ -175,7 +173,7 @@ def test_save_and_restore_with_summary(bn_net: nn.utils.NNModel, tmpdir: local.L
     bn_net = restore(str(tmpdir.join('summary2')))
     assert path.isdir(str(tmpdir.join('summary2')))
 
-    # 'train' summary containing the graph is saved immediately.
+    # 'train' summary containing the g is saved immediately.
     assert path.isdir(str(tmpdir.join('summary2/train')))
 
     train(bn_net)

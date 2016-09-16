@@ -1,48 +1,38 @@
 import threading
 import time
+import collections
+import pprint
+import functools
 from os import path
+import socket
+import py
+import os
 
+import multiprocessing
 from dshin import log
 import numpy as np
 import pytest
 import tensorflow as tf
 from py._path import local
+import typing
 
 from dshin import nn
+from dshin.nn import model_utils
+import dshin
 
 
-class BN(nn.utils.NNModel):
+class Net(model_utils.NNModel):
     def _model(self):
-        out = nn.ops.batch_norm(self['input'], is_trainable=True, is_local=True)
-        self._loss = tf.reduce_mean((out - self['target']) ** 2, name='loss')
-        tf.scalar_summary('loss', self._loss, collections=nn.utils.NNModel.summary_keys('SIMPLE'))
-
-    def _minimize_op(self):
-        return tf.train.AdamOptimizer(self['learning_rate']).minimize(self._loss)
+        out = self.placeholder('input')
+        out = nn.ops.conv2d(out, 5, k=3, s=1, name='conv2d', use_bias=False)
+        out = nn.ops.batch_norm(out, is_trainable=True, is_local=True)
+        loss = tf.reduce_mean((out - self.placeholder('target')) ** 2, name='loss')
+        return loss
 
     def _placeholders(self):
         return [
-            tf.placeholder(tf.int32, shape=[None, 6, 6, 2], name='not_queued'),
-            nn.utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=False),
-            nn.utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', is_file=True),
-        ]
-
-
-class BNWithoutFileInput(nn.utils.NNModel):
-    def _model(self):
-        out = nn.ops.batch_norm(self['input'], is_trainable=True, is_local=True)
-        self._loss = tf.reduce_mean((out - self['target']) ** 2, name='loss')
-        tf.scalar_summary('loss', self._loss, collections=nn.utils.NNModel.summary_keys('SIMPLE'))
-
-    def _minimize_op(self):
-        return tf.train.AdamOptimizer(self['learning_rate']).minimize(self._loss)
-
-    def _placeholders(self):
-        return [
-            tf.placeholder(tf.int32, shape=[None, 6, 6, 2], name='not_queued'),
-            tf.placeholder_with_default([1], shape=[None], name='not_queued2'),
-            nn.utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=False),
-            nn.utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', is_file=False),
+            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=False),
+            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', is_file=True),
         ]
 
 
@@ -60,459 +50,299 @@ def retry_until(func, sec, args=(), sleep=0.05):
             i += 1
 
 
-@pytest.fixture(scope='function')
-def net(tmpdir: local.LocalPath):
-    return BN(seed=42, summary_dir=str(tmpdir.join('summary')))
+def get_local_cluster_spec(num_processes):
+    assert isinstance(num_processes, dict)
+    jobs = collections.defaultdict(list)
+    sockets = []
+    for job_name, num in num_processes.items():
+        for i in range(num):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(s)
+            s.bind(('localhost', 0))
+            addr, port = s.getsockname()
+            host = '{}:{}'.format(addr, port)
+            jobs[job_name].append(host)
+            log.info('Assigned {} to /job:{}/task:{}'.format(host, job_name, i))
+    for s in sockets:
+        s.close()
+    return tf.train.ClusterSpec(jobs)
 
 
-@pytest.fixture(scope='function')
-def net_no_file(tmpdir: local.LocalPath):
-    return BNWithoutFileInput(seed=42, summary_dir=str(tmpdir.join('summary')))
+def ps_worker(cluster_spec, task_id, values):
+    config = nn.utils.default_sess_config(
+        log_device_placement=False, mem=0.05,
+        # device_filters=["/job:ps", "/job:worker/task:%d" % FLAGS.task_index]
+    )
+    server = tf.train.Server(cluster_spec,
+                             job_name='ps',
+                             task_index=task_id,
+                             config=config)
+
+    server.join()
+    log.info('ps_worker is quitting.')
 
 
-@pytest.fixture(scope='module')
-def data():
-    np.random.seed(42)
-    d = {
-        'input': np.ones((2, 5, 5, 1)),
-        'target': 2 * np.ones((2, 5, 5, 1)).astype(np.float32),
-    }
-    d['input'][1] += 1
-    d['target'][1] += 1
-    return d
+class Worker(multiprocessing.Process):
+    def __init__(self, cluster_spec, job_name, task_id, shared_values, barrier=None, sync=True):
+        super(Worker, self).__init__()
+        self.task_id = task_id
+        self.job_name = job_name
+        self.shared_values = shared_values
+        self._barrier = barrier
+        self.cluster_spec = cluster_spec
+        self.sync = sync
+        self.tmpdir = py.test.ensuretemp('{}_{}'.format(job_name, self.task_id))
+        self.num_workers = shared_values['num_processes'][self.job_name]
+        self.shared_values[self.task_id] = collections.defaultdict(list)
+
+    @functools.lru_cache()
+    def data(self, seed=42):
+        np.random.seed(seed)
+        d = {
+            'input': np.ones((2, 5, 5, 1)),
+            'target': 2 * np.ones((2, 5, 5, 1)).astype(np.float32),
+        }
+        d['input'][1] += 1
+        d['target'][1] += 1
+        return d
+
+    def add_value(self, list_name, value):
+        values = self.shared_values[self.task_id]
+        values[list_name].append(value)
+        self.shared_values[self.task_id] = values
+
+    def values(self, list_name):
+        return self.shared_values[self.task_id][list_name]
+
+    def barrier(self, name, timeout=15):
+        while True:
+            start_time = time.time()
+            try:
+                i = self._barrier.wait(timeout=timeout)
+            except threading.BrokenBarrierError  as ex:
+                if time.time() - start_time < timeout:
+                    time.sleep(0.03)
+                    continue
+                else:
+                    raise ex
+            break
+        if i == 0:
+            self._barrier.reset()
+            self.log('All processes passed the "{}" barrier.'.format(name))
+        assert not self._barrier.broken
+
+    def log(self, *args):
+        log.info('[{} %d] {}'.format(self.job_name, ' '.join(['%s' for _ in range(len(args))])), self.task_id, *args)
+
+    def feed_dict(self):
+        data = self.data()
+        return {
+            'input': data['input'],
+            'target': data['target'],
+        }
+
+    def build(self, data_pipeline_only=False):
+        graph = tf.Graph()
+        net = Net(graph, summary_dir='/tmp/summary_dir_{}_{}'.format(self.job_name, self.task_id))
+
+        config = nn.utils.default_sess_config(
+            log_device_placement=False, mem=0.05,
+            # device_filters=["/job:ps", "/job:worker/task:%d" % FLAGS.task_index]
+        )
+        server = tf.train.Server(self.cluster_spec,
+                                 job_name=self.job_name,
+                                 task_index=self.task_id,
+                                 config=config)
+        assert isinstance(net, model_utils.NNModel)
+
+        net.build(server, seed=42, sync_replicas=self.sync, save_model_secs=1, data_pipeline_only=data_pipeline_only)
+        return net
+
+    def run(self):
+        net = self.build()
+
+        self.barrier('build')
+
+        data = self.data()
+        # filenames = self.filenames()
+
+        self.add_value('steps', net.eval('global_step'))
+        self.add_value('losses', net.eval('loss', self.feed_dict()))
+
+        net.train(self.feed_dict())
+        self.barrier('train')
+
+        self.add_value('steps', net.eval('global_step'))
+        self.add_value('losses', net.eval('loss', self.feed_dict()))
+
+        self.barrier('eval')
+        self.add_value('steps', net.eval('global_step'))
+        self.add_value('losses', net.eval('loss', self.feed_dict()))
+
+        assert self.values('steps')[0] == 0
+        if self.sync:
+            assert self.values('steps')[1] == 1
+        else:
+            assert self.values('steps')[1] == self.num_workers
+
+        assert self.values('steps')[2] == self.values('steps')[1]
+        assert self.values('losses')[1] < self.values('losses')[0]
+        assert not np.isclose(self.values('losses')[0], self.values('losses')[1])
+        assert np.isclose(self.values('losses')[1], self.values('losses')[2])
+
+        self.barrier('eval')
+
+        for i in range(10):
+            net.train(self.feed_dict())
+            self.barrier('train_{}'.format(i))
+            self.add_value('steps', net.eval('global_step'))
+            assert self.values('steps')[-1] == self.values('steps')[-2] + (1 if self.sync else self.num_workers)
+
+            self.add_value('losses', net.eval('loss', self.feed_dict()))
+            assert self.values('losses')[-1] < self.values('losses')[-2]
+            self.barrier('eval_{}'.format(i))
+
+        if self.task_id == 0:
+            new_lr = net.eval('learning_rate') * 0.1
+            net.set_learning_rate(new_lr)
+            assert np.isclose(net.eval('learning_rate'), new_lr)
+
+        self.barrier('learning_rate')
+
+        for i in range(10):
+            net.train(self.feed_dict())
+            self.barrier('train_{}'.format(i))
+            self.add_value('steps', net.eval('global_step'))
+            assert self.values('steps')[-1] == self.values('steps')[-2] + (1 if self.sync else self.num_workers)
+
+            self.add_value('losses', net.eval('loss', self.feed_dict()))
+            assert self.values('losses')[-1] < self.values('losses')[-2]
+            self.barrier('eval_{}'.format(i))
+
+        losses1 = np.array(self.values('losses')[-20:-10])
+        losses2 = np.array(self.values('losses')[-10:])
+        assert (losses1[:-1] - losses1[1:]).mean() > (losses2[:-1] - losses2[1:]).mean() * 2
+
+        for i in range(10):
+            net.train({
+                'batch_size': np.random.randint(1, 5)
+            })
+            self.barrier('train_{}'.format(i))
+            self.add_value('steps', net.eval('global_step'))
+            assert self.values('steps')[-1] == self.values('steps')[-2] + (1 if self.sync else self.num_workers)
+
+            self.add_value('losses', net.eval('loss', self.feed_dict()))
+            assert self.values('losses')[-1] < self.values('losses')[-2]
+            self.barrier('eval_{}'.format(i))
+
+        self.log(self.values('steps'))
+        self.log(self.values('losses'))
+
+        self.barrier('eval')
+
+        self.barrier('before_shutdown')
+        net.shutdown()
+        self.barrier('after_shutdown')
 
 
-@pytest.fixture(scope='module')
-def filenames(data, tmpdir_factory):
-    tmpdir = tmpdir_factory.mktemp('npz_files')
-    filenames = []
-    filenames.append(str(tmpdir.join('target0.npz')))
-    np.savez_compressed(filenames[0], data=data['target'][[0]].astype(np.float64))
-    filenames.append(str(tmpdir.join('target1.npz')))
-    np.savez_compressed(filenames[1], data=data['target'][[1]].astype(np.float32))
-    return filenames
+class DataProvider(Worker):
+    def __init__(self, cluster_spec, job_name, task_id, shared_values):
+        super(DataProvider, self).__init__(cluster_spec, job_name, task_id, shared_values, None, False)
 
+    @functools.lru_cache()
+    def filenames(self):
+        data = self.data()
+        tmpdir = self.tmpdir
+        filenames = []
+        filenames.append(str(tmpdir.join('target0.npz')))
+        np.savez_compressed(filenames[0], data=data['target'][[0]].astype(np.float64))
+        filenames.append(str(tmpdir.join('target1.npz')))
+        np.savez_compressed(filenames[1], data=data['target'][[1]].astype(np.float32))
+        return filenames
 
-def test_queue_placeholder_shape():
-    class Net(nn.utils.NNModel):
-        def _model(self):
+    def feed_dict(self):
+        data = self.data()
+        return {
+            'input': data['input'],
+            'target': self.filenames(),
+        }
+
+    def run(self):
+        net = self.build()
+        try:
+            while True:
+                net.enqueue(self.feed_dict())
+        except tf.errors.CancelledError:
             pass
 
-        def _minimize_op(self):
-            return tf.no_op()
 
-        def _placeholders(self):
-            return [nn.utils.QueuePlaceholder(tf.float32, shape=[1, 5, 5, 1], name='input', is_file=False)]
+def test_distributed_queue():
+    for sync in [True, False]:
+        os.system('rm -rf /tmp/summary_dir*')
 
-    with pytest.raises(Exception):
-        Net()
+        manager = multiprocessing.Manager()
+        shared_values = manager.dict()
 
-
-def test_placeholder(net: nn.utils.NNModel):
-    assert net['not_queued'].dtype == tf.int32
-    assert net['not_queued'].get_shape().as_list() == [None, 6, 6, 2]
-    assert 2 * len(net.get_all('^placeholder/.*:0')) == len(net.get_all('^placeholder/.*'))
-
-
-def test_queue_array_placeholder_properties(net: nn.utils.NNModel):
-    assert net['input'].name == 'placeholder/input:0'
-    assert net['input'].get_shape().as_list() == [None, 5, 5, 1]
-    assert net['input'].dtype == tf.float32
-
-    assert net['queue/input'].name == 'placeholder/queue/input:0'
-    assert net['queue/input'].dtype == tf.float32
-    assert net['queue/input'].get_shape().as_list() == [None, 5, 5, 1]
-
-
-def test_queue_operators(net: nn.utils.NNModel):
-    assert isinstance(net['queue/size'], tf.Tensor)
-    assert isinstance(net['worker_queue/size'], tf.Tensor)
-
-    assert isinstance(net['queue/enqueue'], tf.Operation)
-
-    assert isinstance(net['queue/close'], tf.Operation)
-    assert isinstance(net['worker_queue/close'], tf.Operation)
-
-    assert isinstance(net['queue/size$'], tf.Operation)
-    assert isinstance(net['worker_queue/size$'], tf.Operation)
-
-
-def test_queue_file_placeholder_properties(net: nn.utils.NNModel):
-    assert net['target'].name == 'placeholder/target:0'
-    assert net['target'].get_shape().as_list() == [None, 5, 5, 1]
-    assert net['target'].dtype == tf.float32
-
-    assert net['queue/target'].name == 'placeholder/queue/target:0'
-    assert net['queue/target'].dtype == tf.string
-    assert net['queue/target'].get_shape().as_list() == [None]
-
-
-@pytest.mark.timeout(5)
-def test_queue_placeholder_direct_feeding(net: nn.utils.NNModel, data):
-    feed_dict = {
-        'input': data['input'],
-        'target': data['target'],
-        'learning_rate': 0.001,
-    }
-    loss_prev = net.eval('loss', feed_dict)
-    net.train(feed_dict)
-    loss = net.eval('loss', feed_dict)
-    assert loss < loss_prev
-
-    loss_prev, loss = loss, net.eval('loss', feed_dict)
-    assert loss == loss_prev
-
-    net.train(feed_dict)
-    loss_prev, loss = loss, net.eval('loss', feed_dict)
-    assert loss < loss_prev
-
-
-@pytest.mark.timeout(5)
-def test_init_queue_runners(net: nn.utils.NNModel):
-    runners = net.graph.get_collection(tf.GraphKeys.QUEUE_RUNNERS)
-    assert len(runners) == 1
-    assert isinstance(runners[0], tf.train.QueueRunner)
-    assert runners[0].name.startswith(nn.utils.NNModel._consumer_queue_prefix)
-    assert len(net.queue_runner_threads) >= net._worker_queue_num_threads
-
-    for thread in net.queue_runner_threads:
-        assert isinstance(thread, threading.Thread)
-        assert thread.is_alive()
-        assert thread.daemon
-
-
-@pytest.mark.timeout(5)
-def test_shutdown(net: nn.utils.NNModel):
-    runner = net.graph.get_collection(tf.GraphKeys.QUEUE_RUNNERS)[0]
-    assert isinstance(runner, tf.train.QueueRunner)
-    assert not net.coordinator.should_stop()
-
-    def assert_alive():
-        for thread in net.queue_runner_threads:
-            assert thread.is_alive()
-
-    retry_until(assert_alive, sec=1)
-
-    net.shutdown()
-
-    for thread in net.queue_runner_threads:
-        assert not thread.is_alive()
-    assert net.coordinator.joined
-
-
-@pytest.mark.timeout(5)
-def test_enqueue_array(net_no_file: nn.utils.NNModel, data):
-    net = net_no_file
-
-    feed_dict = {
-        'queue/input': data['input'][:1],
-        'queue/target': data['target'][:1],
-    }
-    assert net.eval('worker_queue/size') == 0
-    net.eval('queue/enqueue', feed_dict)
-    assert net.eval('worker_queue/size') == 1
-    net.eval('queue/enqueue', feed_dict)
-    assert net.eval('worker_queue/size') == 2
-    net.shutdown()
-
-
-@pytest.mark.timeout(5)
-def test_dequeue_array_eval(net_no_file: nn.utils.NNModel, data):
-    net = net_no_file
-
-    feed_dict = {
-        'queue/input': data['input'][[0, 0]],
-        'queue/target': data['target'][[0, 0]],
-    }
-    assert net.eval('worker_queue/size') == 0
-    net.eval('queue/enqueue', feed_dict)
-    assert net.eval('worker_queue/size') == 2
-    loss = net.eval('loss', {'batch_size': 1})
-    assert net.eval('worker_queue/size') == 1
-    assert net.eval('loss', {'batch_size': 1}) == loss
-    assert net.eval('worker_queue/size') == 0
-
-
-@pytest.mark.timeout(5)
-def test_dequeue_array_train(net_no_file: nn.utils.NNModel, data):
-    net = net_no_file
-    queue_feed_dict = {
-        'queue/input': data['input'][[0] * 4],
-        'queue/target': data['target'][[0] * 4],
-    }
-    eval_feed_dict = {
-        'input': data['input'][[0, 0]],
-        'target': data['target'][[0, 0]],
-    }
-    train_feed_dict = {
-        'learning_rate': 0.001,
-        'batch_size': 2,
-    }
-    assert net.eval('worker_queue/size') == 0
-    net.eval('queue/enqueue', queue_feed_dict)
-    assert net.eval('worker_queue/size') == 4
-    loss1 = net.eval('loss', eval_feed_dict)
-    assert net.eval('worker_queue/size') == 4
-
-    net.train(train_feed_dict)
-    assert net.eval('worker_queue/size') == 2
-    loss2 = net.eval('loss', eval_feed_dict)
-    assert loss2 < loss1
-    assert net.eval('worker_queue/size') == 2
-
-    net.eval('queue/enqueue', queue_feed_dict)
-    assert net.eval('worker_queue/size') == 6
-
-    train_feed_dict['batch_size'] = 6
-    net.train(train_feed_dict)
-    assert net.eval('worker_queue/size') == 0
-    loss3 = net.eval('loss', eval_feed_dict)
-    assert net.eval('worker_queue/size') == 0
-    assert loss3 < loss2
-
-
-@pytest.mark.timeout(5)
-def test_enqueue_array_and_filename(net: nn.utils.NNModel, data, filenames):
-    net = net
-    feed_dict = {
-        'queue/input': data['input'][:2],
-        'queue/target': filenames[:2],
-    }
-    assert net.eval('worker_queue/size') == 0
-    net.eval('queue/enqueue', feed_dict)
-
-    def assert_enqueue():
-        assert net.eval('worker_queue/size') == 2
-
-    retry_until(assert_enqueue, sec=1)
-
-
-@pytest.mark.timeout(5)
-def test_dequeue_integrity(net: nn.utils.NNModel, data, filenames):
-    net = net
-    assert net.eval('worker_queue/size') == 0
-
-    np.random.seed(9)
-
-    expected_remaining = 3
-
-    num_examples_pushed = 0
-    for i in range(10):
-        n = np.random.randint(1, 4)
-        num_examples_pushed += n
-        indices = [np.random.randint(2) for _ in range(n)]
-        feed_dict = {
-            'queue/input': data['input'][indices],
-            'queue/target': [filenames[j] for j in indices],
+        num_processes = {
+            'ps': 2,
+            'worker': 4,
+            'data': 1,
         }
-        net.eval('queue/enqueue', feed_dict)
-    log.info('Enqueued %d examples.', num_examples_pushed)
 
-    def assert_enqueue():
-        assert net.eval('worker_queue/size') == num_examples_pushed
+        shared_values['num_processes'] = num_processes
 
-    retry_until(assert_enqueue, sec=1)
+        ps_processes = []
+        worker_processes = []
+        data_processes = []
 
-    def dequeue_and_verify(num):
-        dequeue = net.eval(['worker_queue:0', 'worker_queue:1'], {net['batch_size']: num})
+        barrier = manager.Barrier(num_processes['worker'])
 
-        # NOTE: 'input' corresponds to index 0. This might be unstable.
-        dequeue_input = dequeue['worker_queue:0']
-        dequeue_target = dequeue['worker_queue:1']
-        assert dequeue_input.shape == dequeue_target.shape
-        assert dequeue_input.shape[0] == num
+        cluster = get_local_cluster_spec(num_processes)
+        log.info('Cluster %s', cluster.as_dict())
 
-        for i in range(num):
-            is_first = np.allclose(dequeue_input[i], data['input'][0])
-            is_second = np.allclose(dequeue_input[i], data['input'][1])
-            assert is_first != is_second
-            assert np.allclose(dequeue_target[i], data['target'][0 if is_first else 1])
+        for i in range(num_processes['ps']):
+            ps_processes.append(multiprocessing.Process(target=ps_worker, args=[cluster, i, shared_values]))
 
-    expected_num_popped = num_examples_pushed - expected_remaining
-    dequeue_and_verify(expected_num_popped)
-    assert net.eval('worker_queue/size') == expected_remaining
+        for i in range(num_processes['worker']):
+            worker_processes.append(Worker(cluster, 'worker', i, shared_values, barrier, sync))
 
-    dequeue_and_verify(expected_remaining)
-    assert net.eval('worker_queue/size') == 0
+        for i in range(num_processes['data']):
+            data_processes.append(DataProvider(cluster, 'data', i, shared_values))
 
+        for p in ps_processes + worker_processes + data_processes:
+            assert isinstance(p, multiprocessing.Process)
+            p.daemon = True
+            p.start()
+            log.info('Started pid %d (%s)', p.pid, p.name)
 
-@pytest.mark.timeout(5)
-def test_dequeue_atomic(net: nn.utils.NNModel, data, filenames):
-    net = net
-    assert net.eval('worker_queue/size') == 0
+        log.info('Started all processes.')
 
-    np.random.seed(9)
+        for p in worker_processes:
+            p.join()
 
-    expected_remaining = 9
+        for p in worker_processes:
+            if p.exitcode != 0:
+                raise ChildProcessError('Return code is not 0: {}'.format([p.exitcode for p in worker_processes]))
 
-    num_examples_pushed = 0
-    for i in range(10):
-        n = np.random.randint(1, 4)
-        num_examples_pushed += n
-        indices = [np.random.randint(2) for _ in range(n)]
-        feed_dict = {
-            'queue/input': data['input'][indices],
-            'queue/target': [filenames[j] for j in indices],
-        }
-        net.eval('queue/enqueue', feed_dict)
-    log.info('Enqueued %d examples.', num_examples_pushed)
+        log.info('All worker processes finished. Terminating parameter servers.')
 
-    def assert_enqueue():
-        assert net.eval('worker_queue/size') == num_examples_pushed
+        for p in ps_processes:
+            p.terminate()
 
-    retry_until(assert_enqueue, sec=1)
+        for p in ps_processes:
+            p.join()
 
-    def dequeue_and_verify(num, use_both=True):
-        if use_both:
-            dequeue = net.eval(['worker_queue:0', 'worker_queue:1'], {net['batch_size']: num})
-        else:
-            dequeue = net.eval(['worker_queue:0'], {net['batch_size']: num})
+        for tid, values_dict in shared_values.items():
+            if not isinstance(tid, int):
+                continue
+            log.info('%d, %s', tid, dict(values_dict))
+            assert set(shared_values[0].keys()) == set(values_dict.keys())
+            for k, values in shared_values[0].items():
+                assert np.allclose(values_dict[k], values)
 
-        # NOTE: 'input' corresponds to index 0. This might be unstable.
-        dequeue_input = dequeue['worker_queue:0']
-        assert dequeue_input.shape[0] == num
+        log.info('All ps processes finished. Waiting for data servers to finish.')
 
-        if use_both:
-            dequeue_target = dequeue['worker_queue:1']
-            assert dequeue_input.shape == dequeue_target.shape
+        for p in data_processes:
+            p.join()
 
-        for i in range(num):
-            is_first = np.allclose(dequeue_input[i], data['input'][0])
-            is_second = np.allclose(dequeue_input[i], data['input'][1])
-            assert is_first != is_second
-
-            if use_both:
-                assert np.allclose(dequeue_target[i], data['target'][0 if is_first else 1])
-
-    expected_num_popped = num_examples_pushed - expected_remaining
-    dequeue_and_verify(expected_num_popped, use_both=False)
-    assert net.eval('worker_queue/size') == expected_remaining
-
-    dequeue_and_verify(expected_remaining, use_both=True)
-    assert net.eval('worker_queue/size') == 0
-
-
-@pytest.mark.timeout(5)
-def test_dequeue_inconsistent_batch_dimension(net: nn.utils.NNModel, data, filenames):
-    with pytest.raises(Exception):
-        feed_dict = {
-            'queue/input': data['input'][[0] * 2],
-            'queue/target': [filenames[0]],
-        }
-        net.eval('queue/enqueue', feed_dict)
-
-    with pytest.raises(Exception):
-        feed_dict = {
-            'queue/input': data['input'][[0]],
-            'queue/target': [filenames[0], filenames[0]],
-        }
-        net.eval('queue/enqueue', feed_dict)
-
-    with pytest.raises(Exception):
-        feed_dict = {
-            'queue/input': data['input'][[0]],
-            'queue/target': [filenames[0], filenames[0]],
-        }
-        net.eval('queue/enqueue', feed_dict)
-
-
-@pytest.mark.timeout(5)
-def test_enqueue_incomplete_feed(net: nn.utils.NNModel, data):
-    with pytest.raises(Exception):
-        feed_dict = {
-            'queue/input': data['input'][[0] * 2],
-        }
-        net.eval('queue/enqueue', feed_dict)
-
-
-def test_optional_placeholder_queue_coverage(net: nn.utils.NNModel, data, filenames):
-    def dequeue_and_trace(num, feed):
-        new_feed = feed.copy()
-        new_feed.update({'batch_size': num})
-        dequeue = net.eval(['input', 'target'], new_feed,
-                           check_optional_placeholder_coverage=False)
-        inds = []
-        for i in range(num):
-            ind = []
-            is_first = np.allclose(dequeue['input'][i], data['input'][0])
-            is_second = np.allclose(dequeue['input'][i], data['input'][1])
-            assert is_first != is_second
-            ind.append(0 if is_first else 1)
-
-            is_first = np.allclose(dequeue['target'][i], data['target'][0])
-            is_second = np.allclose(dequeue['target'][i], data['target'][1])
-            assert is_first != is_second
-            ind.append(0 if is_first else 1)
-            inds.append(ind)
-
-        return np.array(inds)
-
-    def assert_enqueue(size):
-        assert net.eval('worker_queue/size') == size
-
-    assert net.eval('queue/size') == 0
-    assert net.eval('worker_queue/size') == 0
-    loss1 = net.eval('loss', {
-        'input': data['input'],
-        'target': data['target'],
-    })
-    assert net.eval('queue/size') == 0
-    assert net.eval('worker_queue/size') == 0
-
-    net.enqueue({
-        'input': [data['input'][1]],
-        'target': [filenames[1]],
-    })
-    retry_until(assert_enqueue, sec=1, args=[1])
-
-    inds = dequeue_and_trace(1, {'input': [data['input'][0]]})
-    assert net.eval('worker_queue/size') == 0
-    assert (inds.ravel() == [0, 1]).all()
-
-    for i in range(9):
-        net.enqueue({
-            'input': [data['input'][0]],
-            'target': [filenames[0]],
-        })
-    retry_until(assert_enqueue, sec=1, args=[9])
-
-    inds = dequeue_and_trace(2, {'target': data['target'][[0, 1]]})
-    assert net.eval('worker_queue/size') == 7
-    assert (inds == [[0, 0], [0, 1]]).all()
-
-    inds = dequeue_and_trace(2, {})
-    assert net.eval('worker_queue/size') == 5
-    assert (inds == [[0, 0], [0, 0]]).all()
-
-    loss2 = net.eval('loss', {'batch_size': 1})
-    assert net.eval('worker_queue/size') == 4
-    assert loss1 != loss2
-
-    loss3 = net.eval('loss', {'batch_size': 2})
-    assert net.eval('worker_queue/size') == 2
-    assert loss2 == loss3
-
-    loss4 = net.eval('loss', {
-        'target': data['target'][[1, 1]],
-        'batch_size': 2
-    }, check_optional_placeholder_coverage=False)
-
-    assert net.eval('worker_queue/size') == 0
-    assert loss1 != loss4
-    assert loss2 != loss4
-    assert loss3 != loss4
-
-    with pytest.raises(ValueError):
-        net.eval('loss', {
-            'target': filenames,
-        })
-
-    with pytest.raises(ValueError):
-        net.eval('loss', {
-            'input': data['input'],
-        })
-
-    with pytest.raises(ValueError):
-        net.eval('loss', {
-            'input': data['input'],
-        })
+        log.info('End of main thread.')

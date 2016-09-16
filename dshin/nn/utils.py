@@ -15,7 +15,7 @@ import typecheck as tc
 import typing
 
 from dshin import log
-from dshin.nn import graph
+from dshin.nn import graph_utils
 from dshin.nn import ops as nn_ops
 from dshin.nn import types as nn_types
 
@@ -73,14 +73,14 @@ def match_names(values: nn_types.ValuesOrOperations,
                 suffix: tc.optional(str) = None,
                 return_final_pattern=False):
     """
-    Filters TensorFlow graph objects by regular expression.
+    Filters TensorFlow g objects by regular expression.
 
     :param values: A list of Variables, Tensors, or Operations.
     :param pattern: A regular expression pattern.
     :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
     :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
     :param return_final_pattern: If `True`, return a tuple (list of matched values, regex pattern).
-    :return: A list of matched graph objects. And optionally the regex pattern used for the search.
+    :return: A list of matched g objects. And optionally the regex pattern used for the search.
     """
     if pattern is None:
         pattern = r'.*?'
@@ -245,6 +245,7 @@ class NNModel(metaclass=abc.ABCMeta):
     _global_queue_buffer_size = 2000
     _worker_queue_buffer_size = 100
     _worker_queue_num_threads = 10
+    _total_loss_name = 'alias/loss'
     _summary_modes = {
         'SIMPLE': GraphKeys.SIMPLE_SUMMARIES,
         'IMAGE': GraphKeys.IMAGE_SUMMARIES,
@@ -298,7 +299,7 @@ class NNModel(metaclass=abc.ABCMeta):
         Creates a new model instance.
 
         :param sess: A TensorFlow Session.
-        :param seed: The graph-level random seed.
+        :param seed: The g-level random seed.
         :param build: If `True`, builds and initializes the model.
         :param summary_dir: Path to the summary directory. Created if not exists.
         :param input_queue_device: Device for the input producer queue operations. Defaults to the `global_step` Variable's device
@@ -453,7 +454,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
             # Placeholders for global enqueue ops.
             # Accessed by `self['placeholder/{queue_name}/{tensor_name}']`
-            with graph.abs_name_scope(NNModel._placeholder_prefix):
+            with graph_utils.abs_name_scope(NNModel._placeholder_prefix):
                 name = '{}/{}'.format(queue_name, item.name)
                 assert name not in existing_placeholders
                 placeholder = tf.placeholder(dtype=dtype, shape=shape, name=name)
@@ -472,7 +473,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 # `enqueue_op` is an atomic operation. Values for all of `placeholder/{queue_name}/*` need to be specified at runtime.
                 enqueue_op = queue.enqueue_many(enqueue_tensors, name='enqueue')
 
-                with graph.abs_name_scope(queue_name):
+                with graph_utils.abs_name_scope(queue_name):
                     # `queue/size:0`.
                     queue.size(name='size')
                     queue.close(True, name='close')
@@ -515,7 +516,7 @@ class NNModel(metaclass=abc.ABCMeta):
                      Shape of the tensors will be `placeholder_spec.shape[1:]`
             queue: The `tf.FIFOQueue` object. Not needed in most use cases.
         """
-        with graph.collect_values(tf.GraphKeys.QUEUE_RUNNERS) as queue_runners:
+        with graph_utils.collect_values(tf.GraphKeys.QUEUE_RUNNERS) as queue_runners:
             batch_tensors = tf.train.batch(producer_queue_components.tensors,
                                            batch_size=batch_size,
                                            num_threads=self._worker_queue_num_threads,
@@ -526,7 +527,7 @@ class NNModel(metaclass=abc.ABCMeta):
         assert len(queue_runners) == 1
         queue = queue_runners[0].queue
 
-        with graph.abs_name_scope(name):
+        with graph_utils.abs_name_scope(name):
             # `worker_queue/size:0`.
             queue.size('size')
             queue.close(True, name='close')
@@ -541,7 +542,7 @@ class NNModel(metaclass=abc.ABCMeta):
             assert shape[0].value is None
             for dim in shape[1:]:
                 assert dim.value is not None
-            with graph.abs_name_scope(NNModel._placeholder_prefix):
+            with graph_utils.abs_name_scope(NNModel._placeholder_prefix):
                 if placeholder_name_prefix is not None:
                     key = placeholder_name_prefix + key
                 assert key not in existing_placeholders
@@ -557,7 +558,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def _build_model(self):
         """
-        Populates the graph using user-defined functions.
+        Populates the g using user-defined functions.
         """
         with self.graph.as_default():
             # Accessed by self['global_step']
@@ -566,7 +567,7 @@ class NNModel(metaclass=abc.ABCMeta):
             if self.input_queue_device is None:
                 self.input_queue_device = global_step.device
 
-            with graph.abs_name_scope(NNModel._placeholder_prefix):
+            with graph_utils.abs_name_scope(NNModel._placeholder_prefix):
                 self.default_placeholders()
                 user_placeholders = self._placeholders()
 
@@ -580,14 +581,35 @@ class NNModel(metaclass=abc.ABCMeta):
                                           producer_queue_components=queue_components)
 
             # Builds the main model.
-            self._model()
+            self._loss = self._model()
+            assert isinstance(self._loss, tf.Tensor), '_model() must return a Tensor for the total loss.'
+            if self._loss.name != NNModel._total_loss_name:
+                loss = tf.identity(self._loss, name=NNModel._total_loss_name)
+
+    def find_variable_by_name(self, name):
+        assert isinstance(self.graph, tf.Graph)
+        with self.graph.as_default():
+            for v in tf.all_variables():
+                match_names()
+
+    def init_train(self, num_replicas, worker_id):
+        assert isinstance(self.graph, tf.Graph)
+        with self.graph.as_default():
+            optimizer = self._optimizer()
+            assert isinstance(optimizer, tf.train.Optimizer)
+            optimizer = tf.train.SyncReplicasOptimizer(
+                optimizer,
+                replicas_to_aggregate=num_replicas,
+                replica_id=worker_id,
+                total_num_replicas=num_replicas,
+                use_locking=False
+            )
+
+            train_op = optimizer.minimize(self['alias/'], global_step=self[''])
 
             with tf.variable_scope('train'):
                 with tf.device('/cpu:0'):
                     tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, global_step.assign_add(1))
-
-                minimize_op = self._minimize_op()
-                assert isinstance(minimize_op, tf.Operation)
 
                 # EMA apply ops.
                 update_ops = self.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -626,7 +648,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 keep_checkpoint_every_n_hours=0.5,
             )
 
-        self.initialize()
+        self.initialize_variables()
 
     def _find_placeholders(self):
         placeholders = {}
@@ -671,7 +693,7 @@ class NNModel(metaclass=abc.ABCMeta):
     def _placeholders(self) -> typing.Sequence[typing.Union[tf.Tensor, QueuePlaceholder]]:
         """
         Placeholders defined by the user.
-        Side effect: Populates self.graph.
+        Side effect: Populates self.g.
 
         :return: List of placeholder tensors or QueuePlaceholder objects.
         """
@@ -680,16 +702,15 @@ class NNModel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def _model(self):
         """
-        TensorFlow model defined by the user. Return value is ignored.
-        Side effect: Populates self.graph.
+        TensorFlow model defined by the user. Return value is the total loss.
+        Side effect: Populates self.g.
         """
         return
 
-    @abc.abstractmethod
-    def _minimize_op(self) -> tf.Operation:
+    def _optimizer(self) -> tf.Operation:
         """
         Loss minimization operation defined by the user.
-        Side effect: Populates self.graph.
+        Side effect: Populates self.g.
 
         For example:
         ::
@@ -700,9 +721,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :return: A TensorFlow Operation.
         """
-        return
+        # TODO(daeyun): Document this.
+        return tf.train.AdamOptimizer(learning_rate=self['learning_rate'], epsilon=1e-4)
 
-    def initialize(self):
+    def initialize_variables(self):
         """
         Initializes all TensorFlow variables. Not needed when restoring from a file.
         """
@@ -756,7 +778,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         Runs a training step.
 
-        :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
+        :param feed_dict: A dictionary that maps g elements to values. Keys can be regular expressions
         or placeholder objects.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         :param check_queue_coverage: If `True`, raise an exception when `feed` contains an optional placeholder
@@ -799,7 +821,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         :param values_or_patterns: Similar to the `fetches` argument of `tf.Session.run`. This can
         also be regex patterns. Can be a list or single value.
-        :param feed_dict: A dictionary that maps graph elements to values. Keys can be regular expressions
+        :param feed_dict: A dictionary that maps g elements to values. Keys can be regular expressions
         or placeholder objects.
         :param collection_keys: All values in the given collections will be added to `fetches`.
         :param summary_modes: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
@@ -928,9 +950,9 @@ class NNModel(metaclass=abc.ABCMeta):
     @tc.typecheck
     def variables(self) -> nn_types.Variables:
         """
-        Returns all TensorFlow Variables defined in the graph.
+        Returns all TensorFlow Variables defined in the g.
 
-        :return: All variables in the graph.
+        :return: All variables in the g.
         """
         return self.graph.get_collection(tf.GraphKeys.VARIABLES)
 
@@ -948,7 +970,7 @@ class NNModel(metaclass=abc.ABCMeta):
     @tc.typecheck
     def ops(self) -> nn_types.Operations:
         """
-        Returns all TensorFlow Operations in the graph that do not have an output value.
+        Returns all TensorFlow Operations in the g that do not have an output value.
 
         :return: Operations that do not have an output value.
         """
@@ -962,9 +984,9 @@ class NNModel(metaclass=abc.ABCMeta):
     @tc.typecheck
     def all_values(self) -> nn_types.ValuesOrOperations:
         """
-        Returns all TensorFlow Operations or Tensors defined in the graph.
+        Returns all TensorFlow Operations or Tensors defined in the g.
 
-        :return: All variables and operations in the graph.
+        :return: All variables and operations in the g.
         """
         unique = {}
         for value in self.variables:
@@ -998,7 +1020,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         Retrieves values by a collection key.
 
-        :param collection: A graph collection key. Must exist.
+        :param collection: A g collection key. Must exist.
         :return: All values in the collection.
         """
         # TODO(daeyun): Get unique values in multiple collections.
@@ -1024,7 +1046,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         # Base cases.
         if len(matched) == 0:
-            raise ValueError('Error: pattern {} did not match any values in the graph.'.format(final_pattern))
+            raise ValueError('Error: pattern {} did not match any values in the g.'.format(final_pattern))
 
         return matched
 
@@ -1039,7 +1061,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param pattern: A regular expression pattern.
         :param prefix: A string prepended to `pattern`. Defaults to ``^(.*/)?``.
         :param suffix: A string appended to `pattern`. Defaults to ``(/.*)?$`.
-        :param save_text_summary_on_error: If `True`, write a text summary of objects in the graph on error.
+        :param save_text_summary_on_error: If `True`, write a text summary of objects in the g on error.
         :return: Matched variable or tensor.
         :raises ValueError: If pattern matches more than one item.
         """
@@ -1079,12 +1101,12 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if save_text_summary_on_error:
             if self.summary_dir is not None:
-                graph.save_graph_text_summary(self.graph, dirname=self.summary_dir)
+                graph_utils.save_graph_text_summary(self.graph, dirname=self.summary_dir)
             else:
-                graph.save_graph_text_summary(self.graph)
+                graph_utils.save_graph_text_summary(self.graph)
 
         if len(matched) == 0:
-            raise ValueError('Error: pattern {} did not match any values in the graph.'.format(final_pattern))
+            raise ValueError('Error: pattern {} did not match any values in the g.'.format(final_pattern))
 
         raise ValueError('Error: pattern {} matches multiple values ({} total):\n{}'.format(
             final_pattern, len(matched), '\n'.join([item.name for item in matched])))
@@ -1200,7 +1222,7 @@ class NNModel(metaclass=abc.ABCMeta):
     @tc.typecheck
     def collect(self, key: str, values: tc.any(nn_types.Value, nn_types.Values)):
         """
-        Adds values to a graph collection.
+        Adds values to a g collection.
 
         :param key: Graph key.
         :param values: A value or a list of values.
@@ -1219,10 +1241,10 @@ class RestoredNNModel(NNModel):
     """
 
     def _model(self):
-        # Restored models should not try to build a new graph.
+        # Restored models should not try to build a new g.
         raise NotImplementedError()
 
-    def _minimize_op(self):
+    def _optimizer(self):
         raise NotImplementedError()
 
     def _placeholders(self):

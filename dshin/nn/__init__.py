@@ -9,11 +9,11 @@ assert version.LooseVersion('0.9.0') <= version.LooseVersion(tf.__version__)
 
 from dshin.nn import types
 from dshin.nn import ops
-from dshin.nn import graph
+from dshin.nn import graph_utils
 from dshin.nn import utils
 
 __all__ = [
-    'graph',
+    'graph_utils.py',
     'ops',
     'types',
     'utils',
