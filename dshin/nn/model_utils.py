@@ -457,8 +457,7 @@ class NNModel(metaclass=abc.ABCMeta):
             )
             # Variables created after this will not be saved.
 
-            # TODO(daeyun)
-            graph_utils.save_graph_text_summary(self.graph)
+            # graph_utils.save_graph_text_summary(self.graph)
 
             init_op = tf.initialize_all_variables()
             local_init_op = tf.initialize_local_variables()
