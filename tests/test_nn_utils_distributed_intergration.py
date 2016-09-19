@@ -20,6 +20,8 @@ from dshin import nn
 from dshin.nn import model_utils
 import dshin
 
+pytestmark = pytest.mark.skipif(True, reason='Temporarily disabled')
+
 
 class Net(model_utils.NNModel):
     def _model(self):
@@ -68,6 +70,9 @@ def get_local_cluster_spec(num_processes):
     return tf.train.ClusterSpec(jobs)
 
 
+queue_names = ['train', 'train2']
+
+
 def ps_worker(cluster_spec, task_id, values):
     config = nn.utils.default_sess_config(
         log_device_placement=False, mem=0.05,
@@ -94,6 +99,7 @@ class Worker(multiprocessing.Process):
         self.tmpdir = py.test.ensuretemp('{}_{}'.format(job_name, self.task_id))
         self.num_workers = shared_values['num_processes'][self.job_name]
         self.shared_values[self.task_id] = collections.defaultdict(list)
+        np.random.seed(task_id)
 
     @functools.lru_cache()
     def data(self, seed=42):
@@ -143,7 +149,7 @@ class Worker(multiprocessing.Process):
 
     def build(self, data_pipeline_only=False):
         graph = tf.Graph()
-        net = Net(graph, summary_dir='/tmp/summary_dir_{}_{}'.format(self.job_name, self.task_id))
+        net = Net(graph, log_dir='/tmp/tf_log_dir_{}_{}'.format(self.job_name, self.task_id))
 
         config = nn.utils.default_sess_config(
             log_device_placement=False, mem=0.05,
@@ -155,20 +161,54 @@ class Worker(multiprocessing.Process):
                                  config=config)
         assert isinstance(net, model_utils.NNModel)
 
-        net.build(server, seed=42, sync_replicas=self.sync, save_model_secs=1, data_pipeline_only=data_pipeline_only)
+        net.build(server, source_queue_names=queue_names, source_queue_sizes=[1000, 5],
+                  local_queue_size=150,
+                  seed=42, sync_replicas=self.sync, save_model_secs=1)
         return net
 
     def run(self):
         net = self.build()
 
         self.barrier('build')
+        time.sleep(1)
+
+        net.start_local_queue_runner('train', 40, num_threads=30)
+        net.join_local_queue_runner_threads('train')
+        assert net.eval('worker_queue/size') == 40
+
+        self.barrier('populate')
+        assert net.eval('queue/train/count') == 40 * self.num_workers
+        assert net.eval('queue/train2/count') == 0
+
+        self.barrier('populate')
+        net.start_local_queue_runner('train', 60, num_threads=10)
+        net.join_local_queue_runner_threads('train')
+        assert net.eval('worker_queue/size') == 100
+
+        self.barrier('populate')
+        assert net.eval('queue/train/count') == 100 * self.num_workers
+        assert net.eval('queue/train2/count') == 0
+
+        self.barrier('populate')
+        net.start_local_queue_runner('train2', 5, num_threads=10)
+        net.join_local_queue_runner_threads()
+        assert net.eval('worker_queue/size') == 105
+
+        self.barrier('populate')
+        assert net.eval('queue/train/count') == 100 * self.num_workers
+        assert net.eval('queue/train2/count') == 5 * self.num_workers
+
+        self.barrier('prepare_queue')
+
+        # Not joining until the end.
+        net.start_local_queue_runner('train2', 5, num_threads=10)
 
         data = self.data()
-        # filenames = self.filenames()
 
         self.add_value('steps', net.eval('global_step'))
         self.add_value('losses', net.eval('loss', self.feed_dict()))
 
+        self.barrier('train')
         net.train(self.feed_dict())
         self.barrier('train')
 
@@ -223,10 +263,21 @@ class Worker(multiprocessing.Process):
         losses2 = np.array(self.values('losses')[-10:])
         assert (losses1[:-1] - losses1[1:]).mean() > (losses2[:-1] - losses2[1:]).mean() * 2
 
+        self.log('Now training from the local queue data.')
+        assert net.eval('worker_queue/size') == 110
+
+        expected_worker_queue_size = 110
+
+        assert net.eval('queue/train/count') == 100 * self.num_workers
+        assert net.eval('queue/train2/count') == 10 * self.num_workers
+        self.barrier('source_queue_count')
+
         for i in range(10):
+            num = np.random.randint(1, 5)
             net.train({
-                'batch_size': np.random.randint(1, 5)
+                'batch_size': num
             })
+            expected_worker_queue_size -= num
             self.barrier('train_{}'.format(i))
             self.add_value('steps', net.eval('global_step'))
             assert self.values('steps')[-1] == self.values('steps')[-2] + (1 if self.sync else self.num_workers)
@@ -234,6 +285,20 @@ class Worker(multiprocessing.Process):
             self.add_value('losses', net.eval('loss', self.feed_dict()))
             assert self.values('losses')[-1] < self.values('losses')[-2]
             self.barrier('eval_{}'.format(i))
+
+        assert net.eval('worker_queue/size') == expected_worker_queue_size
+        assert net.eval('queue/train/count') == 100 * self.num_workers
+        assert net.eval('queue/train2/count') == 10 * self.num_workers
+        self.barrier('populate')
+
+        net.start_local_queue_runner('train', 40, num_threads=1)
+        net.join_local_queue_runner_threads('train')
+        expected_worker_queue_size += 40
+        assert net.eval('worker_queue/size') == expected_worker_queue_size
+
+        self.barrier('populate')
+        assert net.eval('queue/train/count') == 140 * self.num_workers
+        assert net.eval('queue/train2/count') == 10 * self.num_workers
 
         self.log(self.values('steps'))
         self.log(self.values('losses'))
@@ -246,8 +311,9 @@ class Worker(multiprocessing.Process):
 
 
 class DataProvider(Worker):
-    def __init__(self, cluster_spec, job_name, task_id, shared_values):
+    def __init__(self, cluster_spec, job_name, task_id, shared_values, queue_name):
         super(DataProvider, self).__init__(cluster_spec, job_name, task_id, shared_values, None, False)
+        self.queue_name = queue_name
 
     @functools.lru_cache()
     def filenames(self):
@@ -271,22 +337,22 @@ class DataProvider(Worker):
         net = self.build()
         try:
             while True:
-                net.enqueue(self.feed_dict())
+                net.enqueue(self.queue_name, self.feed_dict())
         except tf.errors.CancelledError:
             pass
 
 
 def test_distributed_queue():
     for sync in [True, False]:
-        os.system('rm -rf /tmp/summary_dir*')
+        os.system('rm -rf /tmp/tf_log_dir*')
 
         manager = multiprocessing.Manager()
         shared_values = manager.dict()
 
         num_processes = {
             'ps': 2,
-            'worker': 4,
-            'data': 1,
+            'worker': 5,
+            'data': 2,
         }
 
         shared_values['num_processes'] = num_processes
@@ -307,7 +373,7 @@ def test_distributed_queue():
             worker_processes.append(Worker(cluster, 'worker', i, shared_values, barrier, sync))
 
         for i in range(num_processes['data']):
-            data_processes.append(DataProvider(cluster, 'data', i, shared_values))
+            data_processes.append(DataProvider(cluster, 'data', i, shared_values, queue_name=queue_names[i]))
 
         for p in ps_processes + worker_processes + data_processes:
             assert isinstance(p, multiprocessing.Process)
@@ -338,6 +404,7 @@ def test_distributed_queue():
             log.info('%d, %s', tid, dict(values_dict))
             assert set(shared_values[0].keys()) == set(values_dict.keys())
             for k, values in shared_values[0].items():
+                log.info('Max difference was %f', np.abs(np.array(values_dict[k]) - np.array(values)).max())
                 assert np.allclose(values_dict[k], values)
 
         log.info('All ps processes finished. Waiting for data servers to finish.')

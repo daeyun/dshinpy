@@ -172,22 +172,6 @@ def abs_name_scope(name):
         yield scope
 
 
-def job_info_from_server(server):
-    for job in server.server_def.cluster.job:
-        if job.name == server.server_def.job_name:
-            tasks = list(zip(*sorted([(k, v) for k, v in job.tasks.items()])))[1]
-            return job.name, tasks
-    raise RuntimeError('Unable to parse job info.')
-
-
-def task_id_from_server(server):
-    name, tasks = job_info_from_server(server)
-    for task_id, host in enumerate(tasks):
-        target = server.target.decode('utf-8')
-        if host.replace('127.0.0.1', 'localhost') in target.replace('127.0.0.1', 'localhost'):
-            return task_id
-    raise RuntimeError('Unable to parse task id.')
-
 
 def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False, basename='graph_summary.txt'):
     if dirname is None:
@@ -303,7 +287,7 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
         by_operation.append(section)
 
     content = textwrap.dedent('''
-    By g collection keys:
+    By graph collection keys:
     -----------------------------------
     {by_graph_key}
 

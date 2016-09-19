@@ -11,9 +11,10 @@ import typecheck as tc
 from dshin.nn import types as nn_types
 from dshin.third_party import gflags
 
-FLAGS = gflags.FLAGS
 
-gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
+# FLAGS = gflags.FLAGS
+
+# gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
 
 
 def layer(func):
@@ -27,10 +28,13 @@ def layer(func):
 
 
 @tc.typecheck
-def _get_variable(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
+def _get_model_variable(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
     # with tf.device('/cpu:0'):
-    dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
-    return tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
+    # dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
+    dtype = tf.float32
+    var = tf.get_variable(name, shape, initializer=initializer, dtype=dtype, trainable=trainable)
+    tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, var)
+    return var
 
 
 @layer
@@ -47,13 +51,13 @@ def conv2d(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / ((k ** 2) * n_in))
-        w = _get_variable('w', [k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
         conv = tf.nn.conv2d(input_tensor, w, strides=[1, s, s, 1], padding=padding, use_cudnn_on_gpu=True)
 
         if not use_bias:
             return conv
 
-        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_model_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(conv, b)
 
 
@@ -72,7 +76,7 @@ def deconv2d(input_tensor: nn_types.Value,
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
         stddev = math.sqrt(2.0 / ((k ** 2) / (s ** 2) * n_in))
-        w = _get_variable('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -91,7 +95,7 @@ def deconv2d(input_tensor: nn_types.Value,
         if not use_bias:
             return deconv
 
-        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_model_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(deconv, b)
 
 
@@ -109,13 +113,13 @@ def conv3d(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / ((k ** 3) * n_in))
-        w = _get_variable('w', [k, k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [k, k, k, n_in, n_out], initializer=tf.truncated_normal_initializer(stddev=stddev))
         conv = tf.nn.conv3d(input_tensor, w, strides=[1, s, s, s, 1], padding=padding)
 
         if not use_bias:
             return conv
 
-        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_model_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(conv, b)
 
 
@@ -134,7 +138,7 @@ def deconv3d(input_tensor: nn_types.Value,
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
         stddev = math.sqrt(2.0 / ((k ** 3) / (s ** 3) * n_in))
-        w = _get_variable('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -152,7 +156,7 @@ def deconv3d(input_tensor: nn_types.Value,
         if not use_bias:
             return deconv
 
-        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_model_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(deconv, b)
 
 
@@ -168,13 +172,13 @@ def linear(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         n_in = input_tensor.get_shape().as_list()[-1]
         stddev = math.sqrt(2.0 / n_in)
-        w = _get_variable('w', [n_in, n_out], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [n_in, n_out], initializer=tf.random_normal_initializer(stddev=stddev))
         lin = tf.matmul(input_tensor, w)
 
         if not use_bias:
             return lin
 
-        b = _get_variable('b', [n_out], initializer=tf.constant_initializer(0))
+        b = _get_model_variable('b', [n_out], initializer=tf.constant_initializer(0))
         return tf.nn.bias_add(lin, b)
 
 
@@ -263,7 +267,7 @@ def ema_with_initial_value(value: nn_types.Value,
         else:
             shape = value.get_shape().as_list()
             init = tf.constant_initializer(initial_value, dtype=value.dtype)
-            value_copy = _get_variable('value_copy', shape=shape, initializer=init, trainable=False)
+            value_copy = _get_model_variable('value_copy', shape=shape, initializer=init, trainable=False)
             with tf.control_dependencies([tf.assign(value_copy, value)]):
                 apply_op = ema_trainer.apply([value_copy])
                 moving_average = ema_trainer.average(value_copy)
@@ -271,6 +275,18 @@ def ema_with_initial_value(value: nn_types.Value,
         tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, apply_op)
 
         return moving_average
+
+
+def ema(value, decay, name='EMA'):
+    # Reset variable scope.
+    with tf.variable_scope('/') as scope:
+        # TODO(daeyun): Reuse the trainer object so that there is only one apply op per group.
+        # This currently creates a bunch of operations named `ema_#` in the root name scope. variable names are not affected.
+        ema_trainer = tf.train.ExponentialMovingAverage(decay=decay, name=name)
+        apply_op = ema_trainer.apply([value])
+        moving_average = ema_trainer.average(value)
+    tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, apply_op)
+    return moving_average
 
 
 @tc.typecheck
@@ -288,7 +304,7 @@ def ema_with_update_dependencies(values: nn_types.Value, initial_values: float =
         for value, initial_value in zip(values, initial_values):
             shape = value.get_shape().as_list()
             init = tf.constant_initializer(initial_value)
-            value_copy = _get_variable(value.name + ':ema', shape=shape, initializer=init, trainable=False)
+            value_copy = _get_model_variable(value.name + '/ema', shape=shape, initializer=init, trainable=False)
             assign_ops.append(tf.assign(value_copy, value))
             ema_variables.append(value_copy)
 
@@ -346,25 +362,25 @@ def batch_norm(value: nn_types.Value,
     }[rank]
 
     n_out = shape[-1]
-    with tf.variable_scope(name):
-        beta = _get_variable('beta', shape=[n_out], initializer=tf.constant_initializer(offset), trainable=is_trainable)
-        gamma = _get_variable('gamma', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
+    with tf.variable_scope(name) as scope:
+        beta = _get_model_variable('offset', shape=[n_out], initializer=tf.constant_initializer(offset), trainable=is_trainable)
+        gamma = _get_model_variable('scale', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
 
-        batch_mean, batch_var = tf.nn.moments(value, axes, name='moments')
-        batch_var = tf.maximum(batch_var, 0.0)
+        batch_mean, batch_var = tf.nn.moments(value, axes, name=scope.original_name_scope)
+        batch_var = tf.nn.relu(batch_var, name='var')  # Force positive value. Renaming `variance` to `var`.
 
-        ema_trainer = tf.train.ExponentialMovingAverage(decay=ema_decay)
-
-        ema_batch_mean = ema_with_initial_value(batch_mean, 0.0, ema_trainer)
-        ema_batch_var = ema_with_initial_value(batch_var, 1.0, ema_trainer)
+        ema_batch_mean = ema(batch_mean, ema_decay)
+        ema_batch_var = ema(batch_var, ema_decay)
 
         if isinstance(is_local, tf.Tensor) and is_local.dtype == tf.bool:
+            # All 4 variables are always evaluated regardless of what `is_local` is. Updates are not handled here.
+            # Separate update ops should have been added to `tf.GraphKeys.UPDATE_OPS` in `ema()`.
             mean, var = tf.cond(is_local, lambda: (batch_mean, batch_var), lambda: (ema_batch_mean, ema_batch_var))
         else:
             assert isinstance(is_local, bool)
             mean, var = (batch_mean, batch_var) if is_local else (ema_batch_mean, ema_batch_var)
 
-        bn = tf.nn.batch_normalization(value, mean, var, beta, gamma, 1e-5)
+        bn = tf.nn.batch_normalization(value, mean, var, beta, gamma, 1e-5, name='batchnorm')
 
     if return_mean_var:
         return bn, mean, var
@@ -630,8 +646,101 @@ def npz_to_tensor(filename_tensor, dtype, shape):
         assert arr.dtype == dtype.as_numpy_dtype()
         return arr
 
-    out = tf.py_func(_npz_to_array, [filename_tensor], [dtype], stateful=False)
-    tensor = out[0]
+    tensor = tf.py_func(_npz_to_array, [filename_tensor], dtype, stateful=False)
     tensor.set_shape(shape)
 
     return tensor
+
+
+# def out_of_range_if(cond, name=None):
+#     """
+#     Returns an operation that raises `tf.errors.OutOfRangeError` if `cond` is true.
+#     """
+#     with tf.variable_scope(name, default_name='out_of_range_if'):
+#         # TODO(daeyun): This can be re-used.
+#         dummy_var = tf.get_variable('zero', dtype=tf.int32, initializer=0, trainable=False,
+#                                     collections=[tf.GraphKeys.LOCAL_VARIABLES])
+#
+#     with tf.name_scope(name, default_name='out_of_range_if') as scope:
+#         # `tf.count_up_to` here always raises an exception. It is important to define this inside the lambda.
+#         raise_op = tf.cond(cond,
+#                            lambda: tf.count_up_to(dummy_var, 0, name='raise'),
+#                            lambda: dummy_var.value(), name=scope).op
+#     return raise_op
+#
+#
+# def run_n_times_and_raise(count_var, limit_var, name=None):
+#     """
+#     """
+#     assert isinstance(count_var, tf.Variable)
+#     assert isinstance(limit_var, tf.Variable)
+#
+#     with tf.name_scope(name, default_name='CountUpToVariable') as scope:
+#         cond = tf.greater(tf.assign_add(count_var, 1, use_locking=True, name='increment'), limit_var, name='condition')
+#
+#         def raise_op():
+#             return tf.group(tf.count_up_to(count_var, count_var.dtype.base_dtype.min, name='raise'))
+#
+#         # `tf.count_up_to` here always raises an exception and does not modify `ref`.
+#         # It is important to define this inside the lambda.
+#         value = tf.cond(cond, raise_op, lambda: tf.no_op())
+#
+#         # value = tf.Print(value, [value, cond, count_var.value(), limit_var.value()], '###############')
+#
+#         return tf.group(value, name=scope)
+#
+#
+def collection_identity(value, name='identity'):
+    with tf.name_scope(name) as scope:
+        if isinstance(value, (list, tuple)):
+            return tuple(tf.identity(item, name='{}'.format(i)) for i, item in enumerate(value))
+        elif isinstance(value, dict):
+            return {k: tf.identity(item, name='{}'.format(i)) for i, (k, item) in enumerate(value.items())}
+        elif isinstance(value, tf.Tensor):
+            return tf.identity(value, name=scope)
+
+
+#
+#
+# def limit_evaluation_count(tensor, count_var, limit_var, name=None):
+#     """
+#     Returns A `Tensor` with the same value as `tensor`.
+#     Raises OutOfRangeError after evaluating limit_vartimes.
+#     dtype of the counter is always int64.
+#
+#     See also: `tf.train.limit_epochs`
+#     """
+#     assert isinstance(count_var, tf.Variable)
+#     assert isinstance(limit_var, tf.Variable)
+#     with tf.name_scope(name, "LimitEvaluationCount") as scope:
+#         counter = run_n_times_and_raise(count_var, limit_var)
+#         with tf.control_dependencies([counter]):
+#             out_tensor = collection_identity(tensor, name=scope)
+#     return out_tensor
+
+
+def select_one(funcs, index_tensor, name, names):
+    assert isinstance(index_tensor, tf.Tensor)
+    assert len(index_tensor.get_shape().as_list()) == 0
+    assert index_tensor.dtype in (tf.int32, tf.int64)
+    assert len(funcs) > 1
+
+    @functools.lru_cache()
+    def last():
+        return funcs[-1]()
+
+    with tf.name_scope(name) as scope:
+        selected = tf.case({tf.equal(index_tensor, i): func
+                            for i, func in enumerate(funcs[:-1])},
+                           default=last,
+                           exclusive=True, name=scope)
+    if not isinstance(selected, (list, tuple)):
+        return tf.identity(selected, name=scope)
+    elif isinstance(selected, (list, tuple)):
+        ret = []
+        for i, item in enumerate(selected):
+            with tf.name_scope(names[i]) as scope:
+                ret.append(tf.identity(item, name=scope))
+        return ret
+
+    raise ValueError('Unexpected return value type')
