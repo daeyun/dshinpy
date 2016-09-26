@@ -10,16 +10,35 @@ import collections
 import numpy as np
 import textwrap
 
-from IPython.display import display, HTML
+from IPython import display
+from google.protobuf import text_format
 
 
 class IPythonTfGraph(object):
     """
-    Display TensorFlow graphs in Jupyter. http://stackoverflow.com/a/38192374
+    Display TensorFlow graphs in Jupyter.
+    http://stackoverflow.com/a/38192374
+    https://github.com/tensorflow/tensorflow/issues/1978
     """
 
     def __init__(self, graph):
-        self.graph = graph
+        if isinstance(graph, str) and 'pbtxt' in graph:
+            self.graph_def = self.pbtxt_to_graph_def(graph)
+        elif isinstance(graph, tf.GraphDef):
+            self.graph_def = graph
+        elif isinstance(graph, tf.Graph):
+            self.graph_def = graph.as_graph_def()
+        else:
+            raise NotImplementedError()
+
+    def pbtxt_to_graph_def(self, filename):
+        """
+        http://stackoverflow.com/a/38192374/6020752
+        """
+        gdef = tf.GraphDef()
+        with open(filename) as f:
+            text_format.Merge(f.read(), gdef)
+        return gdef
 
     def strip_consts(self, graph_def, max_const_size=32):
         """
@@ -46,12 +65,15 @@ class IPythonTfGraph(object):
                 n.input[i] = rename_func(s) if s[0] != '^' else '^' + rename_func(s[1:])
         return res_def
 
-    def show(self, graph_or_graph_def=None, max_const_size=32):
+    def display_full_width(self):
+        display.display(display.HTML("<style>.container { width:100% !important; }</style>"))
+
+    def show(self, graph_or_graph_def=None, max_const_size=32, height=800, expand_page_width=True):
         """
-        Visualize TensorFlow g.
+        Visualize TensorFlow graph.
         """
         if graph_or_graph_def is None:
-            graph_or_graph_def = self.graph
+            graph_or_graph_def = self.graph_def
 
         if hasattr(graph_or_graph_def, 'as_graph_def'):
             graph_or_graph_def = graph_or_graph_def.as_graph_def()
@@ -63,16 +85,19 @@ class IPythonTfGraph(object):
                 document.getElementById("{id}").pbtxt = {data};
               }}
             </script>
-            <link rel="import" href="https://tensorboard.appspot.com/tf-g-basic.build.html" onload=load()>
-            <div style="height:600px">
-              <tf-g-basic id="{id}"></tf-g-basic>
+            <link rel="import" href="https://tensorboard.appspot.com/tf-graph-basic.build.html" onload=load()>
+            <div style="height:{height}px">
+              <tf-graph-basic id="{id}"></tf-graph-basic>
             </div>
-        """.format(data=repr(str(strip_def)), id='g' + str(np.random.rand()))
+        """.format(data=repr(str(strip_def)), id='graph' + str(np.random.rand()), height=height)
         code = textwrap.dedent(code)
 
-        iframe = """<iframe seamless style="width:800px;height:620px;border:0" srcdoc="{}"></iframe>""".format(code.replace('"', '&quot;'))
+        iframe = """<iframe seamless style="width:100%;height:{}px;border:0" srcdoc="{}"></iframe>""".format(
+            height + 20, code.replace('"', '&quot;'))
 
-        display(HTML(iframe))
+        display.display(display.HTML(iframe))
+        if expand_page_width:
+            self.display_full_width()
 
 
 def backtrace_invalid(tensor: tf.Tensor, feed_dict, maxdepth=2):
@@ -172,8 +197,7 @@ def abs_name_scope(name):
         yield scope
 
 
-
-def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False, basename='graph_summary.txt'):
+def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False, basename='graph_summary.txt', verbose=False):
     if dirname is None:
         dirname = '/tmp/nn_logs'
 
@@ -301,5 +325,6 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
     with open(filename, 'w') as f:
         f.write(content)
 
-    log.info('Wrote g text summary: {}'.format(filename))
+    if verbose:
+        log.info('Wrote graph text summary: {}'.format(filename))
     return filename

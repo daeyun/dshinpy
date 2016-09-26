@@ -633,13 +633,13 @@ def weight_layer(x: nn_types.Value,
     return out
 
 
-def npz_to_tensor(filename_tensor, dtype, shape):
+def npz_to_tensor(filename_tensor, dtype, shape, key='data'):
     assert filename_tensor.dtype == tf.string
 
     def _npz_to_array(filename):
         if isinstance(filename, bytes):
             filename = filename.decode('utf-8')
-        arr = np.load(filename)['data']
+        arr = np.load(filename)[key]
         arr.shape = shape
         if arr.dtype != dtype.as_numpy_dtype():
             arr = arr.astype(dtype=dtype.as_numpy_dtype())

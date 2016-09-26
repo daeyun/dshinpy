@@ -1,34 +1,42 @@
 import abc
-import contextlib
 import functools
-import threading
-import numbers
-import numpy as np
 import os
-import time
-import re
+import threading
+import collections
 from os import path
 
+import numpy as np
 import tensorflow as tf
 import toposort
 import typing
 
 from dshin import log
 from dshin.nn import graph_utils
+from dshin.nn import distributed
 from dshin.nn import ops as nn_ops
-from dshin.nn import types as nn_types
-import collections
-import socket
+from dshin.nn.distributed import job_info_from_server_def
 
 memoize = functools.lru_cache(maxsize=2048, typed=True)
 
 
 class QueuePlaceholder(object):
-    def __init__(self, dtype, shape, name, is_file):
+    def __init__(self, dtype, shape, name, is_file=None, tf_record_key=None):
+        # Assume compression. gzip for "npz", zlib for "tfrecords".
+        assert isinstance(dtype, tf.DType)
+        assert isinstance(shape, (list, tuple))
+        assert isinstance(name, str)
+        assert isinstance(is_file, bool) or is_file is None
+        assert isinstance(tf_record_key, str) or tf_record_key is None
         self.dtype = dtype
         self.shape = shape
         self.name = name
+        if tf_record_key is not None:
+            is_file = True
         self.is_file = is_file
+        self.tf_record_key = tf_record_key
+
+    def __hash__(self):
+        return hash((self.name, self.tf_record_key))
 
 
 class QueueComponents(object):
@@ -140,24 +148,6 @@ def default_sess_config(mem: float = 0.95,
     return conf
 
 
-def get_local_cluster_spec(num_processes):
-    assert isinstance(num_processes, dict)
-    jobs = collections.defaultdict(list)
-    sockets = []
-    for job_name, num in num_processes.items():
-        for i in range(num):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.append(s)
-            s.bind(('localhost', 0))
-            addr, port = s.getsockname()
-            host = '{}:{}'.format(addr, port)
-            jobs[job_name].append(host)
-            log.info('Assigned {} to /job:{}/task:{}'.format(host, job_name, i))
-    for s in sockets:
-        s.close()
-    return tf.train.ClusterSpec(jobs)
-
-
 def ensure_list_or_tuple(value_or_values, dtype=None):
     if isinstance(value_or_values, (list, tuple)):
         out = value_or_values
@@ -166,14 +156,6 @@ def ensure_list_or_tuple(value_or_values, dtype=None):
     if dtype is not None and len(out) != 0:
         assert isinstance(out[0], dtype)
     return out
-
-
-def job_info_from_server_def(server_def):
-    for job in server_def.cluster.job:
-        if job.name == server_def.job_name:
-            tasks = list(zip(*sorted([(k, v) for k, v in job.tasks.items()])))[1]
-            return job.name, tasks
-    raise RuntimeError('Unable to parse job info.')
 
 
 @functools.lru_cache()
@@ -281,6 +263,36 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             self.log_dir = None
 
+        self.job_name = 'worker'
+        self.task_id = 0
+        self.session = None
+        self.server = None
+        self.queue_names = []
+        self.queue_sizes = []
+        self.local_queue_size = 0
+        self.seed = None
+        self.is_chief = False
+        self.hosts = []
+        self.num_replicas = 1
+
+    def _optimizer(self, learning_rate):
+        # TODO(daeyun): consider setting `use_locking`.
+        return tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-4)
+
+    def default_placeholders(self) -> typing.Sequence[tf.Tensor]:
+        return [
+            tf.placeholder(tf.float32, shape=(), name='learning_rate'),
+            tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training'),
+            tf.placeholder(tf.int32, shape=(), name='batch_size'),
+            # tf.placeholder(tf.int64, shape=(), name='limit'),
+        ]
+
+    def default_variables(self):
+        return [
+            tf.get_variable('global_step', shape=(), initializer=tf.constant_initializer(0, dtype=tf.int64), dtype=tf.int64, trainable=False),
+            tf.get_variable('learning_rate', shape=(), initializer=tf.constant_initializer(0.001, dtype=tf.float32), dtype=tf.float32, trainable=False),
+        ]
+
     def _init_summaries(self):
         assert not self.needs_initialization
 
@@ -329,7 +341,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                          validate_shape=True, use_locking=True, name='assign_learning_rate')
         input_queue_device = self.variable('global_step').device
 
-        placeholder_specs = list(filter(lambda item: isinstance(item, QueuePlaceholder), user_placeholders))
+        placeholder_specs = list(filter(lambda item: 'QueuePlaceholder' in item.__class__.__name__, user_placeholders))
 
         if not placeholder_specs:
             return
@@ -354,12 +366,11 @@ class NNModel(metaclass=abc.ABCMeta):
                                                 batch_size=batch_size,
                                                 queue_size=local_queue_size,
                                                 all_source_queue_components=all_queue_components)
+        log.info('Built local queue: %s', tensor_dict)
 
         with tf.name_scope('placeholder/'):
-            for i, (name, tensor) in enumerate(tensor_dict.items()):
-                field_name = placeholder_specs[i].name
-                shape = placeholder_specs[i].shape
-                tf.placeholder_with_default(tensor, shape=shape, name=field_name)
+            for i, (field_name, tensor) in enumerate(tensor_dict.items()):
+                tf.placeholder_with_default(tensor, shape=tensor.get_shape(), name=field_name)
 
         return tensor_dict
 
@@ -374,17 +385,47 @@ class NNModel(metaclass=abc.ABCMeta):
             device = base_device
         return device
 
+    def build_debug_mode(self, sess, seed=None):
+        self.graph = sess.graph
+        self.job_name = 'worker'
+        self.task_id = 0
+        with self.graph.as_default():
+            if seed is not None:
+                # Graph-level random seed.
+                tf.set_random_seed(seed)
+            self._build_input_pipeline('train', [100], 100)
+            loss = self._model()
+            assert isinstance(loss, tf.Tensor), '_model() must return a Tensor for the total loss.'
+            optimizer = self._optimizer(self.variable('learning_rate'))
+
+            with tf.name_scope('minimize') as scope:
+                minimize_op = optimizer.minimize(loss, global_step=self.variable('global_step'))
+                minimize_op = tf.group(minimize_op, name=scope)
+
+            self.session = sess
+            sess.run(tf.initialize_all_variables())
+
+            self.needs_initialization = False
+
+            self._init_summaries()  # Sets self._summary_ops
+
+        log.info('Initialized')
+
     def build(self,
-              server,
+              server=None,
               source_queue_names=('train',),
               source_queue_sizes=(2000,),
-              local_queue_size=100,
+              local_queue_size=150,
               seed=None,
               sync_replicas=True,
               save_model_secs=600):
         assert self.needs_initialization
-        assert isinstance(server, tf.train.Server)
 
+        if server is None:
+            log.info('`tf.train.Server` was not provided. Creating a local server.')
+            server = tf.train.Server.create_local_server()
+
+        assert isinstance(server, tf.train.Server)
         self.server = server
 
         self.queue_names = ensure_list_or_tuple(source_queue_names)
@@ -394,12 +435,14 @@ class NNModel(metaclass=abc.ABCMeta):
         self.seed = seed
 
         self.task_id = server.server_def.task_index
-        self.is_chief = self.task_id == 0
+        self.is_chief = self.task_id == 0 and self.job_name == 'worker'
 
         self.job_name, self.hosts = job_info_from_server_def(server.server_def)
         self.num_replicas = len(self.hosts)
 
         # TODO(daeyun): Prevent data processes from consuming data from the queue
+        if self.job_name == 'data':
+            self.local_queue_size = 0
 
         worker_device_name = self.local_device_name()
         log.info('[%s %d] Device name is %s', self.job_name, self.task_id, worker_device_name)
@@ -444,10 +487,14 @@ class NNModel(metaclass=abc.ABCMeta):
 
             # Exclude any queue-specific variables.
             vars_to_save = []
-            for name in self.queue_names:
-                for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
-                    if not var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)):
-                        vars_to_save.append(var)
+            for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
+                for name in self.queue_names:
+                    if var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)):
+                        break
+                else:
+                    vars_to_save.append(var)
+
+            vars_to_init = {tf.is_variable_initialized(v): v for v in tf.all_variables()}
 
             self.saver = tf.train.Saver(
                 name=self._saver_prefix,
@@ -455,6 +502,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 keep_checkpoint_every_n_hours=0.5,
                 var_list=vars_to_save,
             )
+            self.saved_vars = vars_to_init
             # Variables created after this will not be saved.
 
             # graph_utils.save_graph_text_summary(self.graph)
@@ -469,9 +517,10 @@ class NNModel(metaclass=abc.ABCMeta):
             self.supervisor = tf.train.Supervisor(is_chief=self.is_chief,
                                                   logdir=self.log_dir,
                                                   init_op=init_op,
+                                                  ready_op=None,
                                                   summary_op=summary_op,
                                                   saver=self.saver,
-                                                  recovery_wait_secs=1,
+                                                  recovery_wait_secs=2,
                                                   save_summaries_secs=0,
                                                   global_step=self.variable('global_step'),
                                                   save_model_secs=save_model_secs,
@@ -490,6 +539,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if self.is_chief:
             assert isinstance(sess, tf.Session)
+            is_initialized = self.session.run([value for value in vars_to_init.keys()])
+            uninitialized_vars = [var for is_init, var in zip(is_initialized, vars_to_init.values()) if not is_init]
+            self.session.run([v.initializer for v in uninitialized_vars])
+            log.info('Variables not restored from checkpoint: %s', [v.name for v in uninitialized_vars])
             if sync_replicas:
                 sess.run(init_tokens_op)
             sess.run(local_init_op)
@@ -538,24 +591,32 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         assert len(placeholder_specs) > 0
         names, dtypes, shapes, placeholders = [], [], [], []
-        input_specs_by_name = {item.name: item for item in placeholder_specs}
-        for item in placeholder_specs:
-            assert item.shape[0] is None
+        input_specs_by_name = collections.defaultdict(list)
+        for input_spec in placeholder_specs:
+            if input_spec.name in input_specs_by_name:
+                assert input_spec.is_file and input_spec.tf_record_key is not None
+            # Multiple TFRecord placeholders can share the same name but should have different `tf_record_key` values.
+            for previous_item in input_specs_by_name[input_spec.name]:
+                assert input_spec.tf_record_key != previous_item.tf_record_key
+            input_specs_by_name[input_spec.name].append(input_spec)
 
-            if item.is_file:
+        for input_spec in placeholder_specs:
+            assert input_spec.shape[0] is None
+
+            if input_spec.is_file:
                 dtype = tf.string
-                shape = [item.shape[0]]
+                shape = [input_spec.shape[0]]
             else:
-                dtype = item.dtype
-                shape = item.shape
+                dtype = input_spec.dtype
+                shape = input_spec.shape
 
             # Placeholders for global enqueue ops.
             with tf.name_scope('placeholder/'):
-                name = '{}/{}'.format(queue_name, item.name)
+                name = '{}/{}'.format(queue_name, input_spec.name)
                 assert self.placeholder(name, fail=False) is None
                 placeholder = tf.placeholder(dtype=dtype, shape=shape, name=name)
 
-            names.append(item.name)
+            names.append(input_spec.name)
             dtypes.append(dtype)
             shapes.append(shape[1:])
             placeholders.append(placeholder)
@@ -579,22 +640,89 @@ class NNModel(metaclass=abc.ABCMeta):
                 increment = dequeue_count.assign_add(1, use_locking=True)
 
         with tf.device(dequeue_device):
-            # The dequeue operation itself still happens on `enqueue_device`.
-            with tf.control_dependencies([increment]):
-                dequeue_tensors = queue.dequeue(name='dequeue')
+            with tf.name_scope('{}/'.format(queue_name)):
+                # The dequeue operation itself will still happen on `enqueue_device`.
+                with tf.control_dependencies([increment]):
+                    dequeue_tensors = queue.dequeue(name='dequeue')
+
+            # Maps (placeholder_name -> (tf_record_key -> tf.FIFOQueue))
+            options = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.ZLIB)
+
+            with tf.name_scope('record_reader') as tf_record_scope:
+                tf_record_reader = tf.TFRecordReader(name='reader', options=options)
+
             assert isinstance(dequeue_tensors, dict)
 
-            # Processing (e.g. loading file from retrieved filename) happens on `dequeue_device`.
+            # File IO should happen on `dequeue_device`.
             tensors = {}
-            for field_name, value in dequeue_tensors.items():
-                input_spec = input_specs_by_name[field_name]
-                if input_spec.is_file:
-                    # This should happen on `dequeue_device`.
-                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=input_spec.shape[1:])
+            for placeholder_name, value in dequeue_tensors.items():
+                # It is a `list` because multiple TFRecord placeholders with different `tf_record_key`s can share the same name.
+                input_specs = input_specs_by_name[placeholder_name]
+                tf_record_fields = {spec for spec in input_specs if spec.tf_record_key is not None}
+                npz_fields = {spec for spec in input_specs if spec.tf_record_key is None and spec.is_file}
+                direct_feed = set(input_specs) - tf_record_fields - npz_fields
+                assert len(npz_fields) <= 1 and len(direct_feed) <= 1
+                assert 1 == sum([len(npz_fields) > 0, len(direct_feed) > 0, len(tf_record_fields) > 0])
+
+                if npz_fields:
+                    # Filename should end with '.npz'.
+                    # For now, assume they always have only one key named 'data'.
+                    assert len(npz_fields) == 1
+                    input_spec = npz_fields.pop()
+                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=input_spec.shape[1:], key='data')
+                    tensors[placeholder_name] = value
+                elif tf_record_fields:
+                    # TODO(daeyun): Refactor this block into a separate function.
+                    # Filename should end with '.tfrecords'.
+                    # One queue for each filename.
+                    with tf.name_scope(tf_record_scope), tf.name_scope(placeholder_name):
+                        tf_record_filename_queue = tf.FIFOQueue(capacity=32,
+                                                                dtypes=tf.string, name='filename_queue')
+                        # Enqueue and dequeue immediately. `tf.TFRecordReader.read` requires a queue as input.
+                        # `value` is one of the filename values atomically dequeued from the source queue.
+                        enqueue_record_filename = tf_record_filename_queue.enqueue(value)
+                        with tf.control_dependencies([enqueue_record_filename]):
+                            _, serialized = tf_record_reader.read(tf_record_filename_queue, name='serialized_record')
+                        features = {}
+                        needs_casting = {}
+                        for input_spec in input_specs:
+                            needs_casting[input_spec.tf_record_key] = (
+                                input_spec.dtype.name not in ('float32', 'int64', 'string'))
+                            if needs_casting[input_spec.tf_record_key]:
+                                # Assume other types are stored in a ByteList.
+                                shape, dtype = [1], tf.string  # There should be only one item.
+                            else:
+                                # dtypes matching protobuf types.
+                                shape, dtype = input_spec.shape[1:], input_spec.dtype
+
+                            # TODO(daeyun): Support variable length.
+                            features[input_spec.tf_record_key] = tf.FixedLenFeature(
+                                shape=shape, dtype=dtype, default_value=None)
+
+                        parsed_tensors = tf.parse_single_example(serialized, features=features, name='parsed_tensors')
+                        assert isinstance(parsed_tensors, dict)
+                        for input_spec in input_specs:
+                            with tf.name_scope(input_spec.tf_record_key) as scope:
+                                # There might be some unused fields if they were not specified by the user.
+                                tensor = parsed_tensors[input_spec.tf_record_key]
+                                if needs_casting[input_spec.tf_record_key]:
+                                    if input_spec.dtype.name == 'bool':
+                                        # byte alignment.
+                                        decoded = tf.decode_raw(bytes=tensor, out_type=tf.uint8)
+                                        tensor = tf.cast(decoded, dtype=tf.bool)
+                                    else:
+                                        # Assume little-endian. NOTE: Network byte order is big-endian.
+                                        tensor = tf.decode_raw(bytes=tensor, out_type=input_spec.dtype, little_endian=True)
+                                # Raises error at runtime if shapes are incompatible.
+                                tensor = tf.reshape(tensor, shape=input_spec.shape[1:])
+                            tensors[placeholder_name] = tensor
                 else:
+                    assert len(direct_feed) == 1
+                    input_spec = direct_feed.pop()
                     # Sanity check.
                     value.get_shape().assert_is_compatible_with(input_spec.shape[1:])
-                tensors[field_name] = value
+                    # `value` is a tensor (rather than a filename) directly fed into the queue.
+                    tensors[placeholder_name] = value
 
         return QueueComponents(name=queue.name, enqueue_op=enqueue_op, placeholders=placeholders, queue=queue, tensors=tensors)
 
@@ -602,12 +730,14 @@ class NNModel(metaclass=abc.ABCMeta):
         if name is None:
             name = self._current_local_queue_source_name
         qr = self._consumer_queue_runners[name]
-        assert isinstance(qr, CountingQueueRunner)
+        # assert isinstance(qr, CountingQueueRunner)
         qr.join()
 
     def start_local_queue_runner(self, name, num_examples, num_threads=5):
+        # TODO(daeyun): num_examples is not a clear name.
+
         qr = self._consumer_queue_runners[name]
-        assert isinstance(qr, CountingQueueRunner)
+        # assert isinstance(qr, CountingQueueRunner)
         assert len(qr.running_threads()) == 0
 
         for op in qr.enqueue_ops:
@@ -644,9 +774,11 @@ class NNModel(metaclass=abc.ABCMeta):
         with tf.variable_scope('{}/'.format(name)):
             source_queue_components = all_source_queue_components[0]
             tensors = source_queue_components.tensors
-            types = [t.dtype for t in tensors.values()]
-            shapes = [t.get_shape() for t in tensors.values()]
-            names = source_queue_components.queue.names
+            types, shapes, names = [], [], []
+            for k, v in tensors.items():
+                types.append(v.dtype)
+                shapes.append(v.get_shape())
+                names.append(k)
             queue = tf.FIFOQueue(capacity=queue_size, dtypes=types, shapes=shapes, names=names, shared_name=None, name='queue')
 
             # `queue_name/size:0`.
@@ -679,24 +811,6 @@ class NNModel(metaclass=abc.ABCMeta):
                 assert self.placeholder(key, fail=False) is None
 
             return batch_tensors
-
-    def _optimizer(self, learning_rate):
-        # TODO(daeyun): consider setting `use_locking`.
-        return tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-4)
-
-    def default_variables(self):
-        return [
-            tf.get_variable('global_step', shape=(), initializer=tf.constant_initializer(0, dtype=tf.int64), dtype=tf.int64, trainable=False),
-            tf.get_variable('learning_rate', shape=(), initializer=tf.constant_initializer(0.001, dtype=tf.float32), dtype=tf.float32, trainable=False),
-        ]
-
-    def default_placeholders(self) -> typing.Sequence[tf.Tensor]:
-        return [
-            tf.placeholder(tf.float32, shape=(), name='learning_rate'),
-            tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training'),
-            tf.placeholder(tf.int32, shape=(), name='batch_size'),
-            tf.placeholder(tf.int64, shape=(), name='limit'),
-        ]
 
     def shutdown(self):
         assert not self.needs_initialization
@@ -935,6 +1049,9 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         # if hasattr(self, 'threads'):
         #     print([t.is_alive() for t in self.threads])
+
+        # TODO(daeyun): warn if fetching from the queue and there is no active local queue runner or local queue size is 0.
+        # TODO(daeyun): friendlier error message. e.g. wrong dtype in QueuePlaceholder. Shouold be easier to recognize.
 
         assert not self.needs_initialization, 'Variables are not initialized.'
         if values is None:
