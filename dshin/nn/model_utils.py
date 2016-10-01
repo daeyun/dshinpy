@@ -1,6 +1,7 @@
 import abc
 import functools
 import os
+import time
 import threading
 import collections
 from os import path
@@ -14,9 +15,6 @@ from dshin import log
 from dshin.nn import graph_utils
 from dshin.nn import distributed
 from dshin.nn import ops as nn_ops
-from dshin.nn.distributed import job_info_from_server_def
-
-memoize = functools.lru_cache(maxsize=2048, typed=True)
 
 
 class QueuePlaceholder(object):
@@ -49,48 +47,39 @@ class QueueComponents(object):
 
 
 class CountingQueueRunner(object):
-    def __init__(self, queue, enqueue_ops, timeout_ms=None, name=None):
+    def __init__(self, queue, enqueue_op, parallel_enqueue_op, parallel_enqueue_size, name=None):
         self.queue = queue
-        self.enqueue_ops = enqueue_ops
+        self._enqueue_op = enqueue_op
+        self._parallel_enqueue_op = parallel_enqueue_op
+        self._parallel_enqueue_size = parallel_enqueue_size
         self._count = 0
         self._eval_limit = 0
         self.should_stop = False
         self.name = name
 
-        if timeout_ms is None:
-            self._timeout_ms = 0
-            self._run_options = None
-        else:
-            self._timeout_ms = timeout_ms
-            self._run_options = tf.RunOptions(timeout_in_ms=timeout_ms)
         self._lock = threading.RLock()
         self._threads = []
 
-    def _run(self, sess: tf.Session, enqueue_op: tf.Operation):
+    def _run(self, sess: tf.Session):
         while True:
             with self._lock:
                 if self._count < self._eval_limit:
-                    self._count += 1
-                else:
-                    break
-            while True:
-                if self.should_stop:
-                    break
-                try:
-                    sess.run(enqueue_op, options=self._run_options)
-                except tf.errors.DeadlineExceededError:
-                    pass
+                    is_parallel_enqueue = self._count + self._parallel_enqueue_size < self._eval_limit
+                    if is_parallel_enqueue:
+                        self._count += self._parallel_enqueue_size
+                    else:
+                        self._count += 1
                 else:
                     break
             if self.should_stop:
                 break
+            if is_parallel_enqueue:
+                sess.run(self._parallel_enqueue_op)
+            else:
+                sess.run(self._enqueue_op)
 
     def request_stop(self):
         self.should_stop = True
-
-    @property
-    def timeout(self):
-        return self._timeout_ms
 
     @property
     def count(self):
@@ -114,7 +103,7 @@ class CountingQueueRunner(object):
                 raise RuntimeError('{} threads are still running.'.format(len(running)))
             self._count = 0
 
-    def start_threads(self, sess, eval_limit):
+    def start_threads(self, sess, eval_limit, num_threads):
         assert isinstance(sess, tf.Session)
         assert isinstance(eval_limit, int)
 
@@ -123,10 +112,9 @@ class CountingQueueRunner(object):
             self._eval_limit = eval_limit
 
             threads = []
-            for op in self.enqueue_ops:
-                assert isinstance(op, tf.Operation)
-
-                t = threading.Thread(target=self._run, args=(sess, op))
+            for _ in range(num_threads):
+                assert isinstance(self._enqueue_op, tf.Operation)
+                t = threading.Thread(target=self._run, args=(sess,))
                 t.daemon = True
                 t.start()
                 threads.append(t)
@@ -249,7 +237,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self._consumer_queue_runners = {}
         self._consumer_threads = {}
 
-        self._current_local_queue_source_name = None
+        self._current_source_queue_name = None
 
         self._summary_tensors = []
         self._summary_writers = {}
@@ -263,17 +251,25 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             self.log_dir = None
 
-        self.job_name = 'worker'
+        # These values are set in `self.build()`.
+        self.job_name = ''  # Can be 'worker', 'data', or 'local'. Extracted from `tf.train.Server`.
         self.task_id = 0
-        self.session = None
-        self.server = None
-        self.queue_names = []
-        self.queue_sizes = []
-        self.local_queue_size = 0
-        self.seed = None
+        self.queue_names = []  # Source queue names. e.g. 'train', 'eval'.
+        self.queue_sizes = []  # Source queue capacity.
+        self.local_queue_size = 0  # Ideally this should be at least `batch_size`.
+        self.parallel_read_size = 1
+        self.seed = None  # Optional graph-level random seed.
         self.is_chief = False
-        self.hosts = []
-        self.num_replicas = 1
+        self.num_replicas = 1  # The number of servers whose job name is 'worker'.
+        self.saved_vars = []  # Variables saved and restored from checkpoints.
+        self.saver = None
+        self.server = None
+        self.supervisor = None
+        self.cluster_spec = None  # Initialized from the server.server_def.cluster
+        self.session = None  # Managed session from the supervisor.
+        self._local_queue_size_tensor = None
+        self._source_queue_size_tensors = {}
+        self._tf_record_readers = []  # Only used internally to reuse record readers.
 
     def _optimizer(self, learning_rate):
         # TODO(daeyun): consider setting `use_locking`.
@@ -281,10 +277,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def default_placeholders(self) -> typing.Sequence[tf.Tensor]:
         return [
-            tf.placeholder(tf.float32, shape=(), name='learning_rate'),
+            tf.placeholder(tf.float32, shape=(), name='learning_rate'),  # Used for setting learning rates.
             tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training'),
             tf.placeholder(tf.int32, shape=(), name='batch_size'),
-            # tf.placeholder(tf.int64, shape=(), name='limit'),
         ]
 
     def default_variables(self):
@@ -354,23 +349,29 @@ class NNModel(metaclass=abc.ABCMeta):
             queue_components = self._build_source_queue(placeholder_specs,
                                                         queue_name=source_name,
                                                         queue_size=size,
-                                                        enqueue_device=input_queue_device,
-                                                        dequeue_device=self.local_device_name())
+                                                        enqueue_device=input_queue_device)
 
             return queue_components
 
         all_queue_components = [build_queue(name, size) for name, size in zip(queue_names, queue_sizes)]
 
         consumer_name = '{}'.format(NNModel._consumer_queue_prefix)
-        tensor_dict = self._build_batch_tensors(name=consumer_name,
-                                                batch_size=batch_size,
-                                                queue_size=local_queue_size,
-                                                all_source_queue_components=all_queue_components)
-        log.info('Built local queue: %s', tensor_dict)
 
-        with tf.name_scope('placeholder/'):
-            for i, (field_name, tensor) in enumerate(tensor_dict.items()):
-                tf.placeholder_with_default(tensor, shape=tensor.get_shape(), name=field_name)
+        # Data processes should not be able to consume from the source queue.
+        if self.job_name in ('worker', 'local'):
+            tensor_dict = self._build_batch_tensors(name=consumer_name,
+                                                    batch_size=batch_size,
+                                                    queue_size=local_queue_size,
+                                                    placeholder_specs=placeholder_specs,
+                                                    all_source_queue_components=all_queue_components,
+                                                    local_device=self.local_device_name())
+            log.info('Built local queue: %s', tensor_dict)
+
+            with tf.name_scope('placeholder/'):
+                for i, (field_name, tensor) in enumerate(tensor_dict.items()):
+                    tf.placeholder_with_default(tensor, shape=tensor.get_shape(), name=field_name)
+        else:
+            tensor_dict = {}
 
         return tensor_dict
 
@@ -413,9 +414,11 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def build(self,
               server=None,
+              job_name=None,
               source_queue_names=('train',),
               source_queue_sizes=(2000,),
               local_queue_size=150,
+              parallel_read_size=20,
               seed=None,
               sync_replicas=True,
               save_model_secs=600):
@@ -433,16 +436,29 @@ class NNModel(metaclass=abc.ABCMeta):
         self.local_queue_size = local_queue_size
         assert len(self.queue_names) == len(self.queue_sizes)
         self.seed = seed
+        self.parallel_read_size = parallel_read_size
 
         self.task_id = server.server_def.task_index
-        self.is_chief = self.task_id == 0 and self.job_name == 'worker'
 
-        self.job_name, self.hosts = job_info_from_server_def(server.server_def)
-        self.num_replicas = len(self.hosts)
+        if job_name is None:
+            job_name, _ = distributed.job_info_from_server_def(server.server_def)
+        self.job_name = job_name
 
-        # TODO(daeyun): Prevent data processes from consuming data from the queue
-        if self.job_name == 'data':
-            self.local_queue_size = 0
+        self.cluster_spec = tf.train.ClusterSpec(server.server_def.cluster)
+
+        if self.job_name == 'ps':
+            raise ValueError('Parameter servers should call server.join() instead of using this class.')
+
+        assert self.job_name in ('worker', 'data', 'local')
+
+        self.is_chief = self.task_id == 0 and self.job_name in ('worker', 'local')
+
+        job_names = set(self.cluster_spec.jobs)
+        assert ('worker' in job_names) != ('local' in job_names)
+        trainer_job_name = 'worker' if 'worker' in job_names else 'local'
+
+        # Here the number of replicas is the same as worker tasks, but technically that's not a requirement.
+        self.num_replicas = self.cluster_spec.num_tasks(trainer_job_name)
 
         worker_device_name = self.local_device_name()
         log.info('[%s %d] Device name is %s', self.job_name, self.task_id, worker_device_name)
@@ -477,13 +493,12 @@ class NNModel(metaclass=abc.ABCMeta):
                     minimize_op = tf.group(minimize_op, name=scope)
 
                 queue_runners = []
+                init_tokens_op = None
                 if self.is_chief:
                     if sync_replicas:
                         queue_runners.append(optim.get_chief_queue_runner())
                         queue_runners.extend(self.graph.get_collection(tf.GraphKeys.QUEUE_RUNNERS))
                         init_tokens_op = optim.get_init_tokens_op()
-
-            summary_op = tf.merge_all_summaries()
 
             # Exclude any queue-specific variables.
             vars_to_save = []
@@ -502,10 +517,9 @@ class NNModel(metaclass=abc.ABCMeta):
                 keep_checkpoint_every_n_hours=0.5,
                 var_list=vars_to_save,
             )
-            self.saved_vars = vars_to_init
-            # Variables created after this will not be saved.
+            self.saved_vars = vars_to_save
 
-            # graph_utils.save_graph_text_summary(self.graph)
+            # Variables created after this point will not be saved.
 
             init_op = tf.initialize_all_variables()
             local_init_op = tf.initialize_local_variables()
@@ -518,7 +532,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                                   logdir=self.log_dir,
                                                   init_op=init_op,
                                                   ready_op=None,
-                                                  summary_op=summary_op,
+                                                  summary_op=None,
                                                   saver=self.saver,
                                                   recovery_wait_secs=2,
                                                   save_summaries_secs=0,
@@ -542,9 +556,13 @@ class NNModel(metaclass=abc.ABCMeta):
             is_initialized = self.session.run([value for value in vars_to_init.keys()])
             uninitialized_vars = [var for is_init, var in zip(is_initialized, vars_to_init.values()) if not is_init]
             self.session.run([v.initializer for v in uninitialized_vars])
-            log.info('Variables not restored from checkpoint: %s', [v.name for v in uninitialized_vars])
-            if sync_replicas:
+
+            log.info('Variables not restored from checkpoint were initialized from scratch: %s',
+                     [v.name for v in uninitialized_vars])
+
+            if init_tokens_op is not None:
                 sess.run(init_tokens_op)
+
             sess.run(local_init_op)
             self.supervisor.start_queue_runners(sess, queue_runners)
 
@@ -562,8 +580,7 @@ class NNModel(metaclass=abc.ABCMeta):
                             placeholder_specs,
                             queue_name,
                             queue_size,
-                            enqueue_device,
-                            dequeue_device):
+                            enqueue_device):
         """
         Builds an input queue that atomically operates on the set of values specified by `QueuePlaceholder` objects.
         In order to use this as a global queue in a distributed model, all workers should use the same `queue_device`,
@@ -579,7 +596,8 @@ class NNModel(metaclass=abc.ABCMeta):
         as the first dimension.
         :param queue_name: A unique name. Used as a prefix for the placeholder names. e.g. `placeholder/{queue_name}/{tensor_name}`
         :param queue_size: The capacity of the queue.
-        :param queue_device: Device for the queue operations.
+        :param enqueue_device: Device for the enqueue operations. This should be a shared device. e.g. parameter server.
+        :param dequeue_device: Device for receiving dequeued items and file IO operations. This should be a local device. e.g. worker.
         :return: A `_QueueComponents` with the following fields:
             name: The name of the created queue. e.g. `{queue_name}`
             enqueue_op: An `enqueue_many` operation that enqueues placeholder values.
@@ -591,15 +609,6 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         assert len(placeholder_specs) > 0
         names, dtypes, shapes, placeholders = [], [], [], []
-        input_specs_by_name = collections.defaultdict(list)
-        for input_spec in placeholder_specs:
-            if input_spec.name in input_specs_by_name:
-                assert input_spec.is_file and input_spec.tf_record_key is not None
-            # Multiple TFRecord placeholders can share the same name but should have different `tf_record_key` values.
-            for previous_item in input_specs_by_name[input_spec.name]:
-                assert input_spec.tf_record_key != previous_item.tf_record_key
-            input_specs_by_name[input_spec.name].append(input_spec)
-
         for input_spec in placeholder_specs:
             assert input_spec.shape[0] is None
 
@@ -628,28 +637,42 @@ class NNModel(metaclass=abc.ABCMeta):
 
             with tf.name_scope('{}/'.format(queue_name)):
                 # e.g. `queue/train/size:0`.
-                queue.size(name='size')
+                self._source_queue_size_tensors[queue_name.rsplit('/', 1)[-1]] = queue.size(name='size')
                 queue.close(True, name='close')
                 # `enqueue_op` is an atomic operation. Values for all of `placeholder/{queue_name}/*` need to be specified at runtime.
                 enqueue_op = queue.enqueue_many(enqueue_tensors, name='enqueue')
 
-            with tf.variable_scope('{}/'.format(queue_name)):
-                dequeue_count = tf.Variable(0, trainable=False, dtype=tf.int64, name='count')
+        return QueueComponents(name=queue.name, enqueue_op=enqueue_op, placeholders=placeholders, queue=queue)
 
-                # `use_locking` is needed.
-                increment = dequeue_count.assign_add(1, use_locking=True)
+    def _build_local_fetch_op(self, source_queue, target_queue, placeholder_specs, fetch_device, parallel_read_size):
+        # `source_queue` must be a queue that dequeues a dictionary of tensors.
+        assert isinstance(parallel_read_size, int)
+        assert len(source_queue.names) > 0
+        assert source_queue.names == target_queue.names
 
-        with tf.device(dequeue_device):
-            with tf.name_scope('{}/'.format(queue_name)):
-                # The dequeue operation itself will still happen on `enqueue_device`.
-                with tf.control_dependencies([increment]):
-                    dequeue_tensors = queue.dequeue(name='dequeue')
+        input_specs_by_name = collections.defaultdict(list)
+        for input_spec in placeholder_specs:
+            assert input_spec.name in source_queue.names
+            if input_spec.name in input_specs_by_name:
+                assert input_spec.is_file and input_spec.tf_record_key is not None
+            # Multiple TFRecord placeholders can share the same name but should have different `tf_record_key` values.
+            for previous_item in input_specs_by_name[input_spec.name]:
+                assert input_spec.tf_record_key != previous_item.tf_record_key
+            input_specs_by_name[input_spec.name].append(input_spec)
+
+        queue_name = source_queue.name.rsplit('/', 1)[-1]
+
+        with tf.device(fetch_device):
+            # The dequeue operation itself will still happen on `enqueue_device`.
+            dequeue_tensors = source_queue.dequeue_many(parallel_read_size, name='dequeue')
 
             # Maps (placeholder_name -> (tf_record_key -> tf.FIFOQueue))
             options = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.ZLIB)
 
-            with tf.name_scope('record_reader') as tf_record_scope:
-                tf_record_reader = tf.TFRecordReader(name='reader', options=options)
+            with tf.name_scope('{}/record_readers/'.format(self._consumer_queue_prefix)) as tf_record_scope:
+                while parallel_read_size > len(self._tf_record_readers):
+                    r = tf.TFRecordReader(name='reader', options=options)
+                    self._tf_record_readers.append(r)
 
             assert isinstance(dequeue_tensors, dict)
 
@@ -669,20 +692,26 @@ class NNModel(metaclass=abc.ABCMeta):
                     # For now, assume they always have only one key named 'data'.
                     assert len(npz_fields) == 1
                     input_spec = npz_fields.pop()
-                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=input_spec.shape[1:], key='data')
+                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=[parallel_read_size] + list(input_spec.shape[1:]), key='data')
                     tensors[placeholder_name] = value
                 elif tf_record_fields:
                     # TODO(daeyun): Refactor this block into a separate function.
                     # Filename should end with '.tfrecords'.
                     # One queue for each filename.
                     with tf.name_scope(tf_record_scope), tf.name_scope(placeholder_name):
-                        tf_record_filename_queue = tf.FIFOQueue(capacity=32,
+                        tf_record_filename_queue = tf.FIFOQueue(capacity=parallel_read_size,
                                                                 dtypes=tf.string, name='filename_queue')
                         # Enqueue and dequeue immediately. `tf.TFRecordReader.read` requires a queue as input.
                         # `value` is one of the filename values atomically dequeued from the source queue.
-                        enqueue_record_filename = tf_record_filename_queue.enqueue(value)
-                        with tf.control_dependencies([enqueue_record_filename]):
-                            _, serialized = tf_record_reader.read(tf_record_filename_queue, name='serialized_record')
+                        enqueue_record_filenames = tf_record_filename_queue.enqueue_many(value)
+
+                        parallel_serialized = []
+                        with tf.control_dependencies([enqueue_record_filenames]):
+                            # NOTE(daeyun): This is the reason `parallel_read_size` could not be a variable or placeholder.
+                            for reader in self._tf_record_readers[:parallel_read_size]:
+                                _, serialized = reader.read(tf_record_filename_queue, name='serialized_record')
+                                parallel_serialized.append(serialized)
+
                         features = {}
                         needs_casting = {}
                         for input_spec in input_specs:
@@ -699,10 +728,10 @@ class NNModel(metaclass=abc.ABCMeta):
                             features[input_spec.tf_record_key] = tf.FixedLenFeature(
                                 shape=shape, dtype=dtype, default_value=None)
 
-                        parsed_tensors = tf.parse_single_example(serialized, features=features, name='parsed_tensors')
+                        parsed_tensors = tf.parse_example(parallel_serialized, features=features, name='parsed_tensors')
                         assert isinstance(parsed_tensors, dict)
                         for input_spec in input_specs:
-                            with tf.name_scope(input_spec.tf_record_key) as scope:
+                            with tf.name_scope(input_spec.tf_record_key):
                                 # There might be some unused fields if they were not specified by the user.
                                 tensor = parsed_tensors[input_spec.tf_record_key]
                                 if needs_casting[input_spec.tf_record_key]:
@@ -714,43 +743,49 @@ class NNModel(metaclass=abc.ABCMeta):
                                         # Assume little-endian. NOTE: Network byte order is big-endian.
                                         tensor = tf.decode_raw(bytes=tensor, out_type=input_spec.dtype, little_endian=True)
                                 # Raises error at runtime if shapes are incompatible.
-                                tensor = tf.reshape(tensor, shape=input_spec.shape[1:])
+                                tensor = tf.reshape(tensor, shape=[parallel_read_size] + list(input_spec.shape[1:]))
                             tensors[placeholder_name] = tensor
                 else:
                     assert len(direct_feed) == 1
                     input_spec = direct_feed.pop()
                     # Sanity check.
-                    value.get_shape().assert_is_compatible_with(input_spec.shape[1:])
+                    value.get_shape().assert_is_compatible_with(input_spec.shape)
                     # `value` is a tensor (rather than a filename) directly fed into the queue.
                     tensors[placeholder_name] = value
 
-        return QueueComponents(name=queue.name, enqueue_op=enqueue_op, placeholders=placeholders, queue=queue, tensors=tensors)
+        # Enqueue to the local destination queue.
+        enqueue_op = target_queue.enqueue_many(tensors, name='enqueue')
+        return enqueue_op
 
     def join_local_queue_runner_threads(self, name=None):
         if name is None:
-            name = self._current_local_queue_source_name
+            name = self._current_source_queue_name
         qr = self._consumer_queue_runners[name]
         # assert isinstance(qr, CountingQueueRunner)
         qr.join()
 
-    def start_local_queue_runner(self, name, num_examples, num_threads=5):
-        # TODO(daeyun): num_examples is not a clear name.
+    def start_local_queue_runners(self, queue_name, request_size, num_threads=5):
+        """
+        Starts queue runner threads for fetching data from the global queue.
 
-        qr = self._consumer_queue_runners[name]
+        :param queue_name: Name of the source queue. e.g. 'train' to ask for training data.
+        :param request_size: Number of items needed.
+        :param num_threads: Number of threads running dequeue/enqueue operations.
+        :return:
+        """
+        qr = self._consumer_queue_runners[queue_name]
         # assert isinstance(qr, CountingQueueRunner)
         assert len(qr.running_threads()) == 0
 
-        for op in qr.enqueue_ops:
-            assert op.name == qr.enqueue_ops[0].name
+        self._current_source_queue_name = queue_name
+        current_worker_queue_size = self.queue_size()
+        if current_worker_queue_size != 0:
+            raise RuntimeError('Worker queue size is not 0: {}'.format(current_worker_queue_size))
 
-        self._current_local_queue_source_name = name
-
-        if num_threads is not None and num_threads > 0:
-            qr.enqueue_ops = [qr.enqueue_ops[0]] * num_threads
-        self._consumer_threads[name] = qr.start_threads(self.session, num_examples)
+        self._consumer_threads[queue_name] = qr.start_threads(self.session, request_size, num_threads)
         # TODO(daeyun): check dequeue from the local queues still work after global dequeue halts.
 
-    def _build_batch_tensors(self, name, batch_size, queue_size, all_source_queue_components: typing.Sequence[QueueComponents]):
+    def _build_batch_tensors(self, name, batch_size, queue_size, placeholder_specs, all_source_queue_components: typing.Sequence[QueueComponents], local_device):
         """
         Returns a batched tensor that pulls and concatenates values from the source queue upon evaluation.
 
@@ -772,32 +807,32 @@ class NNModel(metaclass=abc.ABCMeta):
             queue: The `tf.FIFOQueue` object. Not needed in most use cases.
         """
         with tf.variable_scope('{}/'.format(name)):
-            source_queue_components = all_source_queue_components[0]
-            tensors = source_queue_components.tensors
+            # One local queue, multiple enqueue operations.
+
             types, shapes, names = [], [], []
-            for k, v in tensors.items():
-                types.append(v.dtype)
-                shapes.append(v.get_shape())
-                names.append(k)
+            for spec in placeholder_specs:
+                # assert isinstance(spec, QueuePlaceholder)
+                types.append(spec.dtype)
+                shapes.append(spec.shape[1:])
+                names.append(spec.name)
             queue = tf.FIFOQueue(capacity=queue_size, dtypes=types, shapes=shapes, names=names, shared_name=None, name='queue')
 
-            # `queue_name/size:0`.
-            queue.size('size')
+            # `worker_queue/size:0`.
+            self._local_queue_size_tensor = queue.size('size')
             queue.close(True, name='close')
 
+            # `worker_queue/dequeue:*`.
             batch_tensors = queue.dequeue_many(batch_size, name='dequeue')
 
             for source_queue_components in all_source_queue_components:
                 basename = source_queue_components.name.rsplit('/', 1)[-1]
 
                 with tf.variable_scope('{}'.format(basename)):
-                    tensors = source_queue_components.tensors
-
                     # Enqueue to the local destination queue.
-                    enqueue_op = queue.enqueue(tensors, name='enqueue')
-                    enqueue_ops = [enqueue_op]
-
-                    qr = CountingQueueRunner(queue, enqueue_ops=enqueue_ops, name=basename)
+                    parallel_enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue, placeholder_specs, local_device, parallel_read_size=self.parallel_read_size)
+                    enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue, placeholder_specs, local_device, parallel_read_size=1)
+                    qr = CountingQueueRunner(queue, enqueue_op=enqueue_op, parallel_enqueue_op=parallel_enqueue_op,
+                                             parallel_enqueue_size=self.parallel_read_size, name=basename)
                     self._consumer_queue_runners[basename] = qr
 
             # Sanity check.
@@ -884,11 +919,13 @@ class NNModel(metaclass=abc.ABCMeta):
             if ':' not in name:
                 name = '{}:0'.format(name)
             try:
-                for variable in (self.graph.get_collection(tf.GraphKeys.VARIABLES) +
-                                     self.graph.get_collection(tf.GraphKeys.LOCAL_VARIABLES) +
-                                     self.graph.get_collection(tf.GraphKeys.MODEL_VARIABLES) +
-                                     self.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES) +
-                                     self.graph.get_collection(tf.GraphKeys.MOVING_AVERAGE_VARIABLES)):
+                # Assumes all variables belong to at least one collection.
+                variables = self.get_collections([tf.GraphKeys.VARIABLES,
+                                                  tf.GraphKeys.LOCAL_VARIABLES,
+                                                  tf.GraphKeys.MODEL_VARIABLES,
+                                                  tf.GraphKeys.TRAINABLE_VARIABLES,
+                                                  tf.GraphKeys.MOVING_AVERAGE_VARIABLES])
+                for variable in variables:
                     if variable.name == name:
                         results.append(variable)
             except Exception as ex:
@@ -988,10 +1025,12 @@ class NNModel(metaclass=abc.ABCMeta):
         :param check_placeholder_coverage: If `True`, raise an exception when `feed` contains an optional placeholder
         and there are any remaining optional placeholders that depend on the same queue.
         """
+        assert self.job_name in ('worker', 'local')
         self.eval([], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys, check_placeholder_coverage=check_placeholder_coverage)
 
     def enqueue(self, name, feed_dict: dict):
         assert not self.needs_initialization, 'Variables are not initialized.'
+        assert self.job_name in ('worker', 'local')
         new_feed_dict = {}
         for k, v in feed_dict.items():
             if isinstance(k, str):
@@ -1017,9 +1056,9 @@ class NNModel(metaclass=abc.ABCMeta):
         new_learning_rate = self.session.run(self.tensor('assign_learning_rate'), feed_dict={
             self.placeholder('learning_rate'): learning_rate
         })
-        assert np.isclose(learning_rate, new_learning_rate)
+        assert abs(learning_rate - new_learning_rate) < 1e-10
 
-    def learning_rate(self):
+    def current_learning_rate(self):
         return self.session.run(self.variable('learning_rate'))
 
     def eval(self,
@@ -1030,6 +1069,7 @@ class NNModel(metaclass=abc.ABCMeta):
              summary_writer_name=None,
              is_training=False,
              check_placeholder_coverage=True,
+             assert_no_dequeue=False,
              ):
         """
         Evaluates TensorFlow Operations.
@@ -1051,7 +1091,7 @@ class NNModel(metaclass=abc.ABCMeta):
         #     print([t.is_alive() for t in self.threads])
 
         # TODO(daeyun): warn if fetching from the queue and there is no active local queue runner or local queue size is 0.
-        # TODO(daeyun): friendlier error message. e.g. wrong dtype in QueuePlaceholder. Shouold be easier to recognize.
+        # TODO(daeyun): friendlier error message. e.g. wrong dtype in QueuePlaceholder. Should be easier to recognize.
 
         assert not self.needs_initialization, 'Variables are not initialized.'
         if values is None:
@@ -1130,8 +1170,47 @@ class NNModel(metaclass=abc.ABCMeta):
 
         assert len(fetches) > 0, '`fetches` cannot be empty.'
 
-        if check_placeholder_coverage:
+        dequeuing_value = None
+        for item in fetches:
+            # This is cached but may be slow the first time.
+            if self.has_dequeue_dependency(item.name):
+                dequeuing_value = item
+                break
+        will_dequeue = dequeuing_value is not None
+
+        if assert_no_dequeue and will_dequeue:
+            raise ValueError('assert_no_dequeue is True and {} has a dequeue dependency.'.format(dequeuing_value.name))
+
+        if check_placeholder_coverage and will_dequeue:
             check_feed_queue_coverage(new_feed_dict)
+
+        if will_dequeue:
+            batch_size_ph = self.placeholder('batch_size')
+            if batch_size_ph not in new_feed_dict:
+                raise ValueError('{} has a dequeue dependency and batch_size placeholder is missing.'.format(dequeuing_value.name))
+            batch_size_value = new_feed_dict[batch_size_ph]
+
+            if self._current_source_queue_name is None:
+                raise BlockingIOError('Current source queue is not specified. Did you forget to call `.start_local_queue_runners()`?')
+            i = 0
+            while True:
+                local_queue_size = self.queue_size()
+                if local_queue_size < batch_size_value:
+                    log.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(local_queue_size, batch_size_value))
+
+                if local_queue_size > 0:
+                    break
+                if i == 1:
+                    for thread in self._consumer_threads[self._current_source_queue_name]:
+                        assert isinstance(thread, threading.Thread)
+                        if thread.is_alive():
+                            break
+                    else:
+                        raise BlockingIOError('Worker queue is empty and queue runner threads are not running. Did you forget to call `.start_local_queue_runners()`?')
+                log.info('Worker queue is empty. Waiting for data from global queue "{}" (size {}).'.format(
+                    self._current_source_queue_name, self.source_queue_size(self._current_source_queue_name)))
+                time.sleep(min(0.4 * (i + 1), 3))
+                i += 1
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict)
@@ -1179,7 +1258,16 @@ class NNModel(metaclass=abc.ABCMeta):
                 assert isinstance(op, tf.Tensor)
                 summaries.append(op)
 
-        return list({t.name: t for t in summaries}.keys())
+        tensors_by_names = {t.name: t for t in summaries}
+        return list(tensors_by_names.values())
+
+    def queue_size(self):
+        assert self.job_name in ('worker', 'local')
+        return self.session.run(self._local_queue_size_tensor)
+
+    def source_queue_size(self, name):
+        assert name in self._source_queue_size_tensors
+        return self.session.run(self._source_queue_size_tensors[name])
 
     def save(self, save_path: str = None):
         """
@@ -1193,10 +1281,10 @@ class NNModel(metaclass=abc.ABCMeta):
         assert not self.needs_initialization
         assert not path.isdir(save_path) and not save_path.endswith('/'), 'save_path must be a file: {}'.format(save_path)
 
-        dirpath = path.dirname(save_path)
-        if not path.isdir(dirpath):
-            log.info('mkdir %s', dirpath)
-            os.makedirs(dirpath)
+        directory = path.dirname(save_path)
+        if not path.isdir(directory):
+            log.info('mkdir %s', directory)
+            os.makedirs(directory)
 
         with self.graph.as_default():
             self.saver.export_meta_graph(save_path + NNModel._meta_graph_suffix, as_text=True)
@@ -1233,9 +1321,9 @@ class NNModel(metaclass=abc.ABCMeta):
         assert summary_keys in self._summary_keys
 
         with_default_summary_keys = list(summary_keys) + ['scalar']
-        collections = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding scalar summary tag %s to collections %s.', tag, ','.join(collections))
-        summary_op = tf.scalar_summary(tag, value, collections=collections, name=name)
+        collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
+        log.info('Adding scalar summary tag %s to collections %s.', tag, ','.join(collection_keys))
+        summary_op = tf.scalar_summary(tag, value, collections=collection_keys, name=name)
         return summary_op
 
     def add_historgram_summary(self, tag: str, values: tf.Tensor, summary_keys=(), name: str = None) -> tf.Tensor:
@@ -1256,9 +1344,9 @@ class NNModel(metaclass=abc.ABCMeta):
             concat_value = tf.concat(0, [tf.reshape(v, [-1]) if v.get_shape().ndims > 0 else v for v in values], name=scope)
 
         with_default_summary_keys = list(summary_keys) + ['histogram']
-        collections = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding histogram summary tag %s to collection %s', tag, ','.join(collections))
-        summary_op = tf.histogram_summary(tag=tag, name=name, values=concat_value, collections=collections)
+        collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
+        log.info('Adding histogram summary tag %s to collection %s', tag, ','.join(collection_keys))
+        summary_op = tf.histogram_summary(tag=tag, name=name, values=concat_value, collections=collection_keys)
         return summary_op
 
     def add_image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, summary_keys=(), name: str = None) -> tf.Tensor:
@@ -1269,7 +1357,7 @@ class NNModel(metaclass=abc.ABCMeta):
         :param value: A 4-D `uint8` or `float32` `Tensor` of shape `[batch_size, height, width, channels]` where `channels` is 1, 3, or 4.
         :param max_images: Max number of batch elements to generate images for.
         :param name: Will be the same as `tag` by default.
-        :param collections: Graph collection keys to which this operation is added. 'image_summaries' is included by default.
+        :param collection_keys: Graph collection keys to which this operation is added. 'image_summaries' is included by default.
         :return: A scalar `Tensor` of type `string`. The serialized `Summary` protocol buffer.
         """
         if name is None:
@@ -1286,20 +1374,33 @@ class NNModel(metaclass=abc.ABCMeta):
         assert shape[-1] in [1, 3, 4]
 
         with_default_summary_keys = list(summary_keys) + ['image']
-        collections = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape, ','.join(collections), max_images)
-        summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collections, name=name)
+        collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
+        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape, ','.join(collection_keys), max_images)
+        summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collection_keys, name=name)
         return summary_op
+
+    @functools.lru_cache()
+    def has_dequeue_dependency(self, tensor_or_operation_name):
+        assert not self.needs_initialization
+        if ':' in tensor_or_operation_name:
+            tensors = [self.graph.get_tensor_by_name(tensor_or_operation_name)]
+        else:
+            op = self.graph.get_operation_by_name(tensor_or_operation_name)
+            tensors = list(op.inputs)
+        target_name = '{}/dequeue'.format(self._consumer_queue_prefix)
+        for v in graph_utils.find_dependencies(tensors):
+            if target_name in v.name:
+                return True
 
 
 class SampleModel(NNModel):
     def _model(self):
         out = nn_ops.batch_norm(self.placeholder('input'), is_trainable=True, is_local=True)
-        loss = tf.reduce_mean((out - self.placeholder('target')) ** 2, name='loss')
+        loss = tf.reduce_mean(tf.square(tf.sub(out, self.placeholder('target'))), name='loss')
         return loss
 
     def _placeholders(self):
         return [
-            QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=False),
+            QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=True),
             QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', is_file=True),
         ]

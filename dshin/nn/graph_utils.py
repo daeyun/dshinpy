@@ -328,3 +328,30 @@ def save_graph_text_summary(graph: tf.Graph, dirname=None, random_dirname=False,
     if verbose:
         log.info('Wrote graph text summary: {}'.format(filename))
     return filename
+
+
+def find_dependencies(tensors, return_ops=False):
+    assert isinstance(tensors, (list, tuple))
+    q = collections.deque(tensors)
+    tensors = {}
+    operations = {}
+
+    while q:
+        node = q.pop()
+        if isinstance(node, tf.Tensor):
+            op = node.op
+        elif isinstance(node, tf.Operation):
+            op = node
+        else:
+            raise ValueError('Unexpected node type {}'.format(type(node)))
+        for item in op.inputs:
+            if item.name not in tensors:
+                q.appendleft(item)
+                tensors[item.name] = item
+        for item in op.control_inputs:
+            if item.name not in operations:
+                q.appendleft(item)
+                operations[item.name] = item
+    if return_ops:
+        return list(tensors.values()), list(operations.values())
+    return list(tensors.values())

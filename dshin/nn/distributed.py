@@ -36,8 +36,8 @@ def get_local_cluster_spec(num_processes):
 def job_info_from_server_def(server_def):
     for job in server_def.cluster.job:
         if job.name == server_def.job_name:
-            tasks = list(zip(*sorted([(k, v) for k, v in job.tasks.items()])))[1]
-            return job.name, tasks
+            task_hostnames = list(zip(*sorted([(k, v) for k, v in job.tasks.items()])))[1]
+            return job.name, task_hostnames
     raise RuntimeError('Unable to parse job info.')
 
 
