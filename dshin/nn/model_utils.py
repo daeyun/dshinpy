@@ -357,21 +357,17 @@ class NNModel(metaclass=abc.ABCMeta):
 
         consumer_name = '{}'.format(NNModel._consumer_queue_prefix)
 
-        # Data processes should not be able to consume from the source queue.
-        if self.job_name in ('worker', 'local'):
-            tensor_dict = self._build_batch_tensors(name=consumer_name,
-                                                    batch_size=batch_size,
-                                                    queue_size=local_queue_size,
-                                                    placeholder_specs=placeholder_specs,
-                                                    all_source_queue_components=all_queue_components,
-                                                    local_device=self.local_device_name())
-            log.info('Built local queue: %s', tensor_dict)
+        tensor_dict = self._build_batch_tensors(name=consumer_name,
+                                                batch_size=batch_size,
+                                                queue_size=local_queue_size,
+                                                placeholder_specs=placeholder_specs,
+                                                all_source_queue_components=all_queue_components,
+                                                local_device=self.local_device_name())
+        log.info('Built local queue: %s', tensor_dict)
 
-            with tf.name_scope('placeholder/'):
-                for i, (field_name, tensor) in enumerate(tensor_dict.items()):
-                    tf.placeholder_with_default(tensor, shape=tensor.get_shape(), name=field_name)
-        else:
-            tensor_dict = {}
+        with tf.name_scope('placeholder/'):
+            for i, (field_name, tensor) in enumerate(tensor_dict.items()):
+                tf.placeholder_with_default(tensor, shape=tensor.get_shape(), name=field_name)
 
         return tensor_dict
 
@@ -450,6 +446,9 @@ class NNModel(metaclass=abc.ABCMeta):
             raise ValueError('Parameter servers should call server.join() instead of using this class.')
 
         assert self.job_name in ('worker', 'data', 'local')
+
+        if self.job_name == 'data':
+            sync_replicas = False
 
         self.is_chief = self.task_id == 0 and self.job_name in ('worker', 'local')
 
@@ -534,7 +533,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                                   ready_op=None,
                                                   summary_op=None,
                                                   saver=self.saver,
-                                                  recovery_wait_secs=2,
+                                                  recovery_wait_secs=1,
                                                   save_summaries_secs=0,
                                                   global_step=self.variable('global_step'),
                                                   save_model_secs=save_model_secs,
@@ -548,6 +547,10 @@ class NNModel(metaclass=abc.ABCMeta):
                                                            start_standard_services=True)
         assert isinstance(sess, tf.Session)
         self.session = sess
+
+        # Data processes should not be able to consume from the source queue.
+        if self.job_name == 'data':
+            self.session.run(self.operation('{}/close'.format(self._consumer_queue_prefix)))
 
         log.info('[%s %d] Session is ready.', self.job_name, self.task_id)
 
@@ -1030,7 +1033,6 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def enqueue(self, name, feed_dict: dict):
         assert not self.needs_initialization, 'Variables are not initialized.'
-        assert self.job_name in ('worker', 'local')
         new_feed_dict = {}
         for k, v in feed_dict.items():
             if isinstance(k, str):

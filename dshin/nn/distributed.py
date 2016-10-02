@@ -42,19 +42,21 @@ def job_info_from_server_def(server_def):
 
 
 class TFProcess(mp.Process, metaclass=abc.ABCMeta):
-    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, log_dir, session_config=None, gpu_ids=None):
+    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, log_dir, batch_size=None, session_config=None, gpu_ids=None):
         super().__init__()
         self.daemon = True
 
         assert job_name in ('ps', 'worker', 'data')
 
         assert isinstance(cluster_spec, tf.train.ClusterSpec)
+        assert isinstance(gpu_ids, (tuple, list))
 
         self._job_name = job_name
         self._task_id = task_id
         self._cluster_spec = cluster_spec
         self._gpu_ids = gpu_ids
         self._nnmodel_class = nnmodel_class
+        self._batch_size = batch_size
         self._log_dir = log_dir
 
         if session_config is None:
@@ -69,7 +71,7 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
 
     def setup_visible_devices(self):
         if self._gpu_ids is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(self._gpu_ids)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ','.join([str(gid) for gid in self._gpu_ids])
             importlib.reload(tf)
             importlib.reload(device_lib)
 

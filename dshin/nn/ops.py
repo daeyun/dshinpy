@@ -279,7 +279,7 @@ def ema_with_initial_value(value: nn_types.Value,
 
 def ema(value, decay, name='EMA'):
     # Reset variable scope.
-    with tf.variable_scope('/') as scope:
+    with tf.variable_scope('EMA/') as scope:
         # TODO(daeyun): Reuse the trainer object so that there is only one apply op per group.
         # This currently creates a bunch of operations named `ema_#` in the root name scope. variable names are not affected.
         ema_trainer = tf.train.ExponentialMovingAverage(decay=decay, name=name)
