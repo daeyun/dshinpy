@@ -32,6 +32,7 @@ def pts(xy, ax=None, markersize=10, color='r'):
         ax = fig.gca()
 
     ax.scatter(xy[:, 0], xy[:, 1], marker='.', s=markersize, c=color)
+    return ax
 
 
 def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax=None,

@@ -33,8 +33,8 @@ class Net(model_utils.NNModel):
 
     def _placeholders(self):
         return [
-            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', is_file=False),
-            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', is_file=True),
+            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='input', file_type=False),
+            model_utils.QueuePlaceholder(tf.float32, shape=[None, 5, 5, 1], name='target', file_type=True),
         ]
 
 
@@ -172,7 +172,7 @@ class Worker(multiprocessing.Process):
         self.barrier('build')
         time.sleep(1)
 
-        net.start_local_queue_runner('train', 40, num_threads=30)
+        net.start_local_queue_runners('train', 40, num_threads=30)
         net.join_local_queue_runner_threads('train')
         assert net.eval('worker_queue/size') == 40
 
@@ -181,7 +181,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 0
 
         self.barrier('populate')
-        net.start_local_queue_runner('train', 60, num_threads=10)
+        net.start_local_queue_runners('train', 60, num_threads=10)
         net.join_local_queue_runner_threads('train')
         assert net.eval('worker_queue/size') == 100
 
@@ -190,7 +190,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 0
 
         self.barrier('populate')
-        net.start_local_queue_runner('train2', 5, num_threads=10)
+        net.start_local_queue_runners('train2', 5, num_threads=10)
         net.join_local_queue_runner_threads()
         assert net.eval('worker_queue/size') == 105
 
@@ -201,7 +201,7 @@ class Worker(multiprocessing.Process):
         self.barrier('prepare_queue')
 
         # Not joining until the end.
-        net.start_local_queue_runner('train2', 5, num_threads=10)
+        net.start_local_queue_runners('train2', 5, num_threads=10)
 
         data = self.data()
 
@@ -291,7 +291,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 10 * self.num_workers
         self.barrier('populate')
 
-        net.start_local_queue_runner('train', 40, num_threads=1)
+        net.start_local_queue_runners('train', 40, num_threads=1)
         net.join_local_queue_runner_threads('train')
         expected_worker_queue_size += 40
         assert net.eval('worker_queue/size') == expected_worker_queue_size

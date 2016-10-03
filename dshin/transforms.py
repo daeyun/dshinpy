@@ -55,14 +55,26 @@ def xrotate(theta, deg=True):
     http://www.labri.fr/perso/nrougier/teaching/opengl/
     """
     if deg:
-        theta = math.pi * theta / 180.0
-    cosT = math.cos(theta)
-    sinT = math.sin(theta)
-    R = numpy.array(
-        [[1.0, 0.0, 0.0, 0.0],
-         [0.0, cosT, -sinT, 0.0],
-         [0.0, sinT, cosT, 0.0],
-         [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+        theta = np.rad2deg(theta)
+
+    is_batch = (isinstance(theta, np.ndarray) and theta.size > 1) or np.array(theta).size > 1
+
+    cosT = np.cos(theta)
+    sinT = np.sin(theta)
+
+    if is_batch:
+        assert theta.ndim == 1
+        R = np.tile(np.eye(4), (theta.shape[0], 1, 1))
+        R[:, 1, 1] = cosT
+        R[:, 2, 2] = cosT
+        R[:, 1, 2] = -sinT
+        R[:, 2, 1] = sinT
+    else:
+        R = numpy.array(
+            [[1.0, 0.0, 0.0, 0.0],
+             [0.0, cosT, -sinT, 0.0],
+             [0.0, sinT, cosT, 0.0],
+             [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
     return R
 
 
@@ -87,42 +99,93 @@ def zrotate(theta, deg=True):
     http://www.labri.fr/perso/nrougier/teaching/opengl/
     """
     if deg:
-        theta = math.pi * theta / 180.0
-    cosT = math.cos(theta)
-    sinT = math.sin(theta)
-    R = numpy.array(
-        [[cosT, -sinT, 0.0, 0.0],
-         [sinT, cosT, 0.0, 0.0],
-         [0.0, 0.0, 1.0, 0.0],
-         [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+        theta = np.rad2deg(theta)
+
+    is_batch = (isinstance(theta, np.ndarray) and theta.size > 1) or np.array(theta).size > 1
+
+    cosT = np.cos(theta)
+    sinT = np.sin(theta)
+
+    if is_batch:
+        assert theta.ndim == 1
+        R = np.tile(np.eye(4), (theta.shape[0], 1, 1))
+        R[:, 0, 0] = cosT
+        R[:, 1, 1] = cosT
+        R[:, 0, 1] = -sinT
+        R[:, 1, 0] = sinT
+    else:
+        R = numpy.array(
+            [[cosT, -sinT, 0.0, 0.0],
+             [sinT, cosT, 0.0, 0.0],
+             [0.0, 0.0, 1.0, 0.0],
+             [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
     return R
 
 
 def rotation_matrix(angle, direction, point=None, deg=True):
     """
-    http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
+    Based on http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
     """
-    if np.isclose(angle, 0.0):
-        return np.eye(4)
+    assert direction.ndim in (1, 2)
+    is_batch = direction.ndim == 2
+    if is_batch:
+        assert angle.shape[0] == direction.shape[0]
+        assert direction.shape[1] == 3
+        if point is not None:
+            assert point.shape[1] == 3
+
     if deg:
-        angle = math.pi * angle / 180
-    sina = math.sin(angle)
-    cosa = math.cos(angle)
-    direction = direction.astype(np.float32)
-    direction /= la.norm(direction, 2)
+        angle = np.rad2deg(angle)
+
+    if np.issubdtype(direction.dtype, np.integer):
+        direction = direction.astype(np.float64)
+
+    sina = np.sin(angle)
+    cosa = np.cos(angle)
+
     # rotation matrix around unit vector
-    R = numpy.diag([cosa, cosa, cosa])
-    R += numpy.outer(direction, direction) * (1.0 - cosa)
-    direction *= sina
-    R += numpy.array([[0.0, -direction[2], direction[1]],
-                      [direction[2], 0.0, -direction[0]],
-                      [-direction[1], direction[0], 0.0]])
-    M = numpy.identity(4)
-    M[:3, :3] = R
+    if is_batch:
+        axis = np.divide(direction, la.norm(direction, ord=2, axis=1, keepdims=True))
+        # If direction is (0,0,0), return identity.
+        nans = np.any(np.isnan(axis), axis=1)
+
+        R = np.zeros((cosa.shape[0], 3, 3))
+        R[:, [0, 1, 2], [0, 1, 2]] = cosa[:, None]
+        R += np.matmul(axis[:, :, None], axis[:, None, :]) * (1.0 - cosa)[:, None, None]
+        axis *= sina[:, None]
+    else:
+        axis = np.divide(direction, la.norm(direction, ord=2))
+        if np.any(np.isnan(axis)):
+            return np.eye(4)
+
+        R = numpy.diag([cosa, cosa, cosa])
+        R += numpy.outer(axis, axis) * (1.0 - cosa)
+        axis *= sina
+
+    if is_batch:
+        R[:, [2, 0, 1], [1, 2, 0]] += axis
+        R[:, [1, 2, 0], [2, 0, 1]] -= axis
+        M = np.zeros((angle.shape[0], 4, 4))
+        M[:, :3, :3] = R
+        M[:, 3, 3] = 1
+    else:
+        R += numpy.array([[0.0, -axis[2], axis[1]],
+                          [axis[2], 0.0, -axis[0]],
+                          [-axis[1], axis[0], 0.0]])
+        M = np.eye(4)
+        M[:3, :3] = R
+
     if point is not None:
         # rotation not around origin
-        point = numpy.array(point[:3], dtype=numpy.float64, copy=False)
-        M[:3, 3] = point - numpy.dot(R, point)
+        if is_batch:
+            M[:, :3, 3] = point - np.matmul(R, point[:, :, None]).squeeze()
+        else:
+            point = numpy.array(point[:3], dtype=numpy.float64, copy=False)
+            M[:3, 3] = point - numpy.dot(R, point)
+
+    if is_batch:
+        M[nans] = np.eye(4)
+
     return M
 
 
@@ -133,21 +196,19 @@ def angle(v1, v2, axis=0, deg=False, ref_plane=None):
     :param deg: Returns angle in degrees if True, radians if False.
     :param ref_plane: If set, returns a signed angle for right-handed rotation with respect to this plane.
     """
-    v1n = la.norm(v1, ord=2, axis=axis, keepdims=True)
-    v1 = v1 / v1n
-
-    v2n = la.norm(v2, ord=2, axis=axis, keepdims=True)
-    v2 = v2 / v2n
+    v1n = np.divide(v1, la.norm(v1, ord=2, axis=axis, keepdims=True))
+    v2n = np.divide(v2, la.norm(v2, ord=2, axis=axis, keepdims=True))
 
     # More numerically stable than arccos.
-    dotprod = (v1 * v2).sum(axis=axis)
-    crossprod = np.cross(v1, v2, axis=axis)
-    angle = np.arctan2(la.norm(crossprod, ord=2, axis=axis, keepdims=True), dotprod)
+    dotprod = (v1n * v2n).sum(axis=axis)
+    crossprod = np.cross(v1n, v2n, axis=axis)
+    ret = np.arctan2(la.norm(crossprod, ord=2, axis=axis, keepdims=True), dotprod)
+
     if deg:
-        angle = angle / math.pi * 180.0
+        ret = np.rad2deg(ret)
     if ref_plane is not None:
-        angle *= np.sign((crossprod * ref_plane).sum(axis=axis))
-    return angle
+        ret *= np.sign((crossprod * ref_plane).sum(axis=axis))
+    return ret
 
 
 def frustum(left, right, bottom, top, znear, zfar):

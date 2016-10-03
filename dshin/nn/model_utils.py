@@ -3,6 +3,7 @@ import functools
 import os
 import time
 import threading
+import numbers
 import collections
 from os import path
 
@@ -92,6 +93,9 @@ class CountingQueueRunner(object):
     def running_threads(self):
         return [t for t in self._threads if t.is_alive()]
 
+    def remaining_enqueue(self):
+        return self._eval_limit - self._count
+
     def join(self):
         for t in self._threads:
             t.join()
@@ -140,7 +144,7 @@ def ensure_list_or_tuple(value_or_values, dtype=None):
     if isinstance(value_or_values, (list, tuple)):
         out = value_or_values
     else:
-        out = tuple(value_or_values)
+        out = (value_or_values,)
     if dtype is not None and len(out) != 0:
         assert isinstance(out[0], dtype)
     return out
@@ -245,8 +249,12 @@ class NNModel(metaclass=abc.ABCMeta):
         if log_dir:
             self.log_dir = path.expanduser(log_dir)
             if not path.isdir(self.log_dir):
-                os.makedirs(self.log_dir)
-                log.info('Created directory: %s', self.log_dir)
+                try:
+                    os.makedirs(self.log_dir)
+                    log.info('Created directory: %s', self.log_dir)
+                except FileExistsError:
+                    # Race condition.
+                    pass
             assert path.isdir(self.log_dir)
         else:
             self.log_dir = None
@@ -289,17 +297,14 @@ class NNModel(metaclass=abc.ABCMeta):
         ]
 
     def _init_summaries(self):
-        assert not self.needs_initialization
-
         if self.log_dir:
-            with self.graph.as_default():
-                self._summary_tensors = {}
-                for name in self._summary_keys:
-                    fullname = self._summary_key_prefix + name
-                    self._summary_tensors[name] = tf.merge_all_summaries(key=fullname)
+            self._summary_tensors = {}
+            for name in self._summary_keys:
+                fullname = self._summary_key_prefix + name
+                self._summary_tensors[name] = tf.merge_all_summaries(key=fullname)
 
             # Graph is only added to the 'train' summary file.
-            self._summary_writers['train'] = self._summary_writer('train', graph=self.session.graph)
+            self._summary_writers['train'] = self._summary_writer('train', graph=tf.get_default_graph())
 
     def _summary_writer(self, name: str = 'eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
         """
@@ -404,7 +409,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
             self.needs_initialization = False
 
-            self._init_summaries()  # Sets self._summary_ops
+            self._init_summaries()  # Sets self._summary_tensors
 
         log.info('Initialized')
 
@@ -439,6 +444,9 @@ class NNModel(metaclass=abc.ABCMeta):
         if job_name is None:
             job_name, _ = distributed.job_info_from_server_def(server.server_def)
         self.job_name = job_name
+
+        if self.log_dir:
+            log.add_file_handler(path.join(self.log_dir, 'out.log'))
 
         self.cluster_spec = tf.train.ClusterSpec(server.server_def.cluster)
 
@@ -500,6 +508,7 @@ class NNModel(metaclass=abc.ABCMeta):
                         init_tokens_op = optim.get_init_tokens_op()
 
             # Exclude any queue-specific variables.
+            # TODO(daeyun): exclude local steps.
             vars_to_save = []
             for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
                 for name in self.queue_names:
@@ -522,6 +531,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
             init_op = tf.initialize_all_variables()
             local_init_op = tf.initialize_local_variables()
+
+            if self.is_chief:
+                self._init_summaries()  # Sets self._summary_tensors
 
             if path.isfile(self.checkpoint_filename()):
                 log.info('{} exists. Model will be restored.'.format(self.checkpoint_filename()))
@@ -547,12 +559,11 @@ class NNModel(metaclass=abc.ABCMeta):
                                                            start_standard_services=True)
         assert isinstance(sess, tf.Session)
         self.session = sess
+        log.info('[%s %d] Session is ready.', self.job_name, self.task_id)
 
         # Data processes should not be able to consume from the source queue.
         if self.job_name == 'data':
             self.session.run(self.operation('{}/close'.format(self._consumer_queue_prefix)))
-
-        log.info('[%s %d] Session is ready.', self.job_name, self.task_id)
 
         if self.is_chief:
             assert isinstance(sess, tf.Session)
@@ -566,15 +577,30 @@ class NNModel(metaclass=abc.ABCMeta):
             if init_tokens_op is not None:
                 sess.run(init_tokens_op)
 
-            sess.run(local_init_op)
             self.supervisor.start_queue_runners(sess, queue_runners)
 
+            log.info('Initialized chief.')
+
+        sess.run(local_init_op)
         self.needs_initialization = False
+        log.info('Initialized local variables.')
 
-        self._init_summaries()  # Sets self._summary_ops
+        if self.is_chief and self.log_dir:
+            graph_utils.save_graph_text_summary(self.graph, dirname=self.log_dir, verbose=True)
 
-        log.info('global_step: %d', self.eval('global_step'))
-        log.info('learning_rate: %f', self.eval('learning_rate'))
+        # Waiting until variables are initialized.
+        while True:
+            try:
+                log.info('global_step: %d', self.eval('global_step'))
+                log.info('learning_rate: %f', self.eval('learning_rate'))
+            except tf.errors.FailedPreconditionError as ex:
+                assert not self.is_chief
+                time.sleep(0.1)
+            except Exception as ex:
+                log.error('Unexpected exception: {}.'.format(ex))
+                raise ex
+            else:
+                break
 
     def checkpoint_filename(self):
         return path.join(self.log_dir, self._checkpoint_basename)
@@ -767,7 +793,7 @@ class NNModel(metaclass=abc.ABCMeta):
         # assert isinstance(qr, CountingQueueRunner)
         qr.join()
 
-    def start_local_queue_runners(self, queue_name, request_size, num_threads=5):
+    def start_local_queue_runners(self, queue_name, request_size, num_threads=5) -> CountingQueueRunner:
         """
         Starts queue runner threads for fetching data from the global queue.
 
@@ -781,12 +807,14 @@ class NNModel(metaclass=abc.ABCMeta):
         assert len(qr.running_threads()) == 0
 
         self._current_source_queue_name = queue_name
-        current_worker_queue_size = self.queue_size()
+        current_worker_queue_size = self.current_queue_size()
         if current_worker_queue_size != 0:
             raise RuntimeError('Worker queue size is not 0: {}'.format(current_worker_queue_size))
 
         self._consumer_threads[queue_name] = qr.start_threads(self.session, request_size, num_threads)
         # TODO(daeyun): check dequeue from the local queues still work after global dequeue halts.
+
+        return qr
 
     def _build_batch_tensors(self, name, batch_size, queue_size, placeholder_specs, all_source_queue_components: typing.Sequence[QueueComponents], local_device):
         """
@@ -967,7 +995,13 @@ class NNModel(metaclass=abc.ABCMeta):
             if isinstance(name, tf.Tensor):
                 results.append(name)
                 continue
-            assert isinstance(name, str)
+            try:
+                assert isinstance(name, str)
+            except Exception as ex:
+                if fail:
+                    raise ex
+                results.append(None)
+                continue
 
             if ':' not in name:
                 name = '{}:0'.format(name)
@@ -1029,6 +1063,7 @@ class NNModel(metaclass=abc.ABCMeta):
         and there are any remaining optional placeholders that depend on the same queue.
         """
         assert self.job_name in ('worker', 'local')
+        # summary_writer_name should be 'train' by default.
         self.eval([], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys, check_placeholder_coverage=check_placeholder_coverage)
 
     def enqueue(self, name, feed_dict: dict):
@@ -1062,6 +1097,13 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def current_learning_rate(self):
         return self.session.run(self.variable('learning_rate'))
+
+    def current_global_step(self):
+        return self.session.run(self.variable('global_step'))
+
+    def has_data(self):
+        qr = self._consumer_queue_runners[self._current_source_queue_name]
+        return qr.remaining_enqueue() > 0 or len(qr.running_threads()) > 0 or self.current_queue_size() > 0
 
     def eval(self,
              values=None,
@@ -1107,7 +1149,8 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             if len(summary_keys) == 0:
                 # TODO(daeyun): Log only once.
-                log.warn('Non-default empty `summary_modes`. This was probably not expected.')
+                log.warn('Non-default empty `summary_keys`. This was probably not expected.')
+        summary_keys = ensure_list_or_tuple(summary_keys, str)
 
         is_single_value = isinstance(values, (tf.Tensor, tf.Operation, str))
         if is_single_value:
@@ -1151,7 +1194,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 new_feed_dict[self.placeholder('is_training')] = False
 
         # Do not allow using enqueue placeholders e.g. placeholder/queue/input to avoid confusion because they are not needed
-        # here in most use cases.
+        # here in most use cases. Use `NNModel.enqueue`.
         enqueue_prefix = 'placeholder/{}/'.format(self._source_queue_prefix)
         for placeholder, _ in new_feed_dict.items():
             if enqueue_prefix in placeholder.name:
@@ -1165,7 +1208,11 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_key not in self._summary_keys:
                 raise ValueError('Unrecognized summary key: {}'.format(summary_key))
 
-        summary_ops = self.summary_tensors(summary_keys)
+        # Only the chief process computes summaries.
+        if self.is_chief:
+            summary_ops = self.summary_tensors(summary_keys)
+        else:
+            summary_ops = ()
         summary_op_fetch_indices = (len(fetches), len(fetches) + len(summary_ops))
         if summary_ops:
             fetches.extend(summary_ops)
@@ -1196,7 +1243,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 raise BlockingIOError('Current source queue is not specified. Did you forget to call `.start_local_queue_runners()`?')
             i = 0
             while True:
-                local_queue_size = self.queue_size()
+                local_queue_size = self.current_queue_size()
                 if local_queue_size < batch_size_value:
                     log.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(local_queue_size, batch_size_value))
 
@@ -1229,9 +1276,6 @@ class NNModel(metaclass=abc.ABCMeta):
                 assert isinstance(summary_result, bytes)
                 writer.add_summary(summary_result, global_step=global_step)
 
-            # TODO(daeyun): Listen for a keypress event to signal flush.
-            writer.flush()
-
         if is_single_value:
             return out_eval[0]
 
@@ -1241,6 +1285,40 @@ class NNModel(metaclass=abc.ABCMeta):
             if result is not None:
                 results[name] = result
         return results
+
+    def flush_summary_writers(self, names=None):
+        if not self.is_chief:
+            return
+        if names is None:
+            names = tuple(self._summary_writers.keys())
+        names = ensure_list_or_tuple(names, str)
+        for name in names:
+            assert name in self._summary_writers
+            writer = self._summary_writers[name]
+            assert isinstance(writer, tf.train.SummaryWriter)
+            writer.flush()
+
+    def write_scalar_summary(self, tag, value, summary_writer_name, flush=False):
+        """
+        Directly writes a scalar Python value as a summary protobuf. Creates a new summary writer if one matching `summary_writer_name` does not already exist.
+        """
+        if not self.is_chief:
+            return
+        assert isinstance(tag, str)
+        assert isinstance(summary_writer_name, str)
+        assert isinstance(value, numbers.Real)
+
+        summary = tf.Summary(value=[
+            tf.Summary.Value(tag=tag, simple_value=value),
+        ])
+        writer = self._summary_writer(summary_writer_name)
+        global_step = self.current_global_step()
+        writer.add_summary(summary, global_step)
+
+        if flush:
+            writer.flush()
+
+        return writer
 
     def summary_tensors(self, keys) -> typing.Sequence[tf.Tensor]:
         """
@@ -1263,7 +1341,7 @@ class NNModel(metaclass=abc.ABCMeta):
         tensors_by_names = {t.name: t for t in summaries}
         return list(tensors_by_names.values())
 
-    def queue_size(self):
+    def current_queue_size(self):
         assert self.job_name in ('worker', 'local')
         return self.session.run(self._local_queue_size_tensor)
 
@@ -1320,7 +1398,7 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
                 log.info('Adding a new summary key: %s', summary_key)
-        assert summary_keys in self._summary_keys
+        assert set(summary_keys).issubset(self._summary_keys)
 
         with_default_summary_keys = list(summary_keys) + ['scalar']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
@@ -1340,7 +1418,7 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
                 log.info('Adding a new summary key: %s', summary_key)
-        assert summary_keys in self._summary_keys
+        assert set(summary_keys).issubset(self._summary_keys)
 
         with tf.name_scope('histogram_summary_value') as scope:
             concat_value = tf.concat(0, [tf.reshape(v, [-1]) if v.get_shape().ndims > 0 else v for v in values], name=scope)
@@ -1369,7 +1447,7 @@ class NNModel(metaclass=abc.ABCMeta):
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
                 log.info('Adding a new summary key: %s', summary_key)
-        assert summary_keys in self._summary_keys
+        assert set(summary_keys).issubset(self._summary_keys)
 
         shape = value.get_shape().as_list()
         assert len(shape) == 4

@@ -149,6 +149,22 @@ class DataSource(object):
             out[k] = self._assign_paginators_recursive(v)
         return out
 
+    def _keys_recursive(self, paginator_dict):
+        if not isinstance(paginator_dict, dict):
+            return [[paginator_dict.count]]
+        ret = []
+        for k, v in paginator_dict.items():
+            for keypath in self._keys_recursive(v):
+                ret.append([k] + keypath)
+        return ret
+
+    def keys(self):
+        ret = []
+        for key in self._keys_recursive(self._paginator):
+            count = key[-1]
+            ret.append(('/'.join(key[:-1]), count))
+        return ret
+
     def paginator(self, key):
         """
         `QueryPaginator` corresponding to `self.query[key1][key2][...]` given `key=(key1, key2, ...)`.
@@ -158,8 +174,10 @@ class DataSource(object):
         """
         paginator = self._paginator
         assert isinstance(key, tuple) or isinstance(key, list)
-        for key in key:
-            paginator = paginator[key]
+        for k in key:
+            if not isinstance(paginator, dict):
+                raise ValueError('Invalid data key: {}'.format(key))
+            paginator = paginator[k]
         assert isinstance(paginator, QueryPaginator)
         return paginator
 
@@ -190,7 +208,6 @@ class DataSource(object):
         """
         return self.paginator(key).current_row
 
-    @ensure.ensure_annotations
     def batch_count(self, batch_size: int, key: typing.Sequence[str]) -> int:
         """
         Total number of batches per iteration.

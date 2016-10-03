@@ -130,17 +130,17 @@ def test_save_and_restore_no_summary(bn_net: nn.model_utils.NNModel, tmpdir: loc
     assert after_train == after_restore_and_train
     assert after_restore > after_restore_and_train
 
-    assert np.isclose(net.learning_rate(), 0.0015)
+    assert np.isclose(net.current_learning_rate(), 0.0015)
     net.set_learning_rate(0.0001)
-    assert np.isclose(net.learning_rate(), 0.0001)
+    assert np.isclose(net.current_learning_rate(), 0.0001)
     restore()
-    assert np.isclose(net.learning_rate(), 0.0015)
+    assert np.isclose(net.current_learning_rate(), 0.0015)
 
     net = bn_net_factory(net.log_dir)
     # already restored.
-    assert np.isclose(net.learning_rate(), 0.0015)
+    assert np.isclose(net.current_learning_rate(), 0.0015)
     restore(net)
-    assert np.isclose(net.learning_rate(), 0.0015)
+    assert np.isclose(net.current_learning_rate(), 0.0015)
 
 
 def test_save_and_restore_with_summary(bn_net: nn.model_utils.NNModel, tmpdir: local.LocalPath, data):

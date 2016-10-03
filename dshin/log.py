@@ -5,7 +5,9 @@ Based on https://github.com/benley/python-glog/blob/master/glog.py
 Changelog: 2016/02  Removed gflags dependency.
 """
 import logging
+import os.path
 import time
+
 
 def format_message(record):
     try:
@@ -14,12 +16,13 @@ def format_message(record):
         record_message = record.msg
     return record_message
 
+
 class GlogFormatter(logging.Formatter):
     LEVEL_MAP = {
         logging.FATAL: 'F',
         logging.ERROR: 'E',
-        logging.WARN : 'W',
-        logging.INFO : 'I',
+        logging.WARN: 'W',
+        logging.INFO: 'I',
         logging.DEBUG: 'D'
     }
 
@@ -41,12 +44,14 @@ class GlogFormatter(logging.Formatter):
         record.getMessage = lambda: record_message
         return logging.Formatter.format(self, record)
 
+
 logger = logging.getLogger()
-handler = logging.StreamHandler()
+
 
 def setLevel(newlevel):
     logger.setLevel(newlevel)
     logger.debug('Log level set to %s', newlevel)
+
 
 debug = logging.debug
 info = logging.info
@@ -66,8 +71,8 @@ FATAL = logging.FATAL
 
 _level_names = {
     DEBUG: 'DEBUG',
-    INFO : 'INFO',
-    WARN : 'WARN',
+    INFO: 'INFO',
+    WARN: 'WARN',
     ERROR: 'ERROR',
     FATAL: 'FATAL'
 }
@@ -88,8 +93,19 @@ GLOG_PREFIX_REGEX = (
 """Regex you can use to parse glog line prefixes."""
 
 # Defaults
-handler.setFormatter(GlogFormatter())
-logger.addHandler(handler)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(GlogFormatter())
+logger.addHandler(stream_handler)
 setLevel(logging.INFO)
+
+
+def add_file_handler(filename):
+    if os.path.isfile(filename):
+        info('Appending to an existing log file {}'.format(filename))
+    else:
+        info('New log file {}'.format(filename))
+    file_handler = logging.FileHandler(filename)
+    file_handler.setFormatter(GlogFormatter())
+    logger.addHandler(file_handler)
 
 # logging.debug(time.strftime("Local time zone: %Z (%z)", time.localtime()))
