@@ -59,9 +59,6 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
         self._batch_size = batch_size
         self._log_dir = log_dir
 
-        if session_config is None:
-            session_config = utils.default_sess_config(log_device_placement=False, mem=0.01)
-
         self._session_config = session_config
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
 

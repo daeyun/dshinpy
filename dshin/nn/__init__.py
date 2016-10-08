@@ -13,6 +13,7 @@ from dshin.nn import graph_utils
 from dshin.nn import model_utils
 from dshin.nn import utils
 from dshin.nn import distributed
+from dshin.nn import io
 
 from dshin.nn.model_utils import QueuePlaceholder
 from dshin.nn.model_utils import NNModel
@@ -20,6 +21,7 @@ from dshin.nn.model_utils import NNModel
 __all__ = [
     'graph_utils',
     'ops',
+    'io',
     'types',
     'model_utils',
     'utils',

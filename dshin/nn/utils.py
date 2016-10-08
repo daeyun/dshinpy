@@ -154,7 +154,7 @@ def check_feed_queue_coverage(feed_dict):
 
 
 @tc.typecheck
-def default_sess_config(mem: float = 0.95,
+def default_sess_config(mem: float = 0.98,
                         log_device_placement: bool = False,
                         device_filters=None) -> tf.ConfigProto:
     conf = tf.ConfigProto(device_filters=device_filters)
