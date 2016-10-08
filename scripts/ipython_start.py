@@ -2,7 +2,6 @@
 %run -i ipython_start.py {page_width}
 """
 import sys
-import collections
 
 from IPython import display as IPy_display
 
@@ -43,19 +42,22 @@ __extend_sys_path(
     append_paths=['~/Dropbox/git/dshinpy/', '~/Dropbox/git/multiview_shape/'],
 )
 
-import os
+import abc
+import array
+import collections
+import contextlib
+import copy
+import functools
+import itertools
+import math
 import multiprocessing as mp
+import os
+import random
 import re
+import struct
 import threading
 import time
-import abc
-import math
 import typing
-import functools
-import contextlib
-import array
-import struct
-import itertools
 
 import psutil
 import numpy as np
@@ -130,8 +132,8 @@ def tf_init(self, cell):
     <span style="font-size:80%">{0}</span>
     """.format(filename)))
 
-    # sess.run(tf.initialize_all_variables())
-    # sess.run(tf.initialize_local_variables())
+    sess.run(tf.initialize_all_variables())
+    sess.run(tf.initialize_local_variables())
     # tf.train.start_queue_runners(sess)
 
 
@@ -142,3 +144,17 @@ from IPython import Application
 def restart(line):
     app = Application.instance()
     app.kernel.do_shutdown(True)
+
+
+def import_optional(module_name, alias=None, is_verbose=False):
+    if alias is None:
+        alias = module_name
+    try:
+        globals()[alias] = __import__(module_name)
+    except ImportError:
+        if is_verbose:
+            log.info('Optional dependency {} could not be imported.'.format(module_name))
+
+
+import_optional('tflearn')
+import_optional('tqdm')
