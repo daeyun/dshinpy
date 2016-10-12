@@ -1,4 +1,5 @@
 from os import path
+from dshin import log
 import sys
 import os
 import numpy as np
@@ -99,8 +100,15 @@ def read_ply(filename):
 def save_off(mesh, filename):
     verts = mesh['v'].astype(np.float32)
     faces = mesh['f'].astype(np.int32)
+
+    filename = path.expanduser(filename)
     if not path.isdir(path.dirname(filename)):
         os.makedirs(path.dirname(filename))
+
+    # Overwrite.
+    if path.exists(filename):
+        log.warn('Removing existing file %s', filename)
+        os.remove(filename)
 
     with open(path.expanduser(filename), 'ab') as fp:
         fp.write('OFF\n{} {} 0\n'.format(
@@ -108,6 +116,13 @@ def save_off(mesh, filename):
         np.savetxt(fp, verts, fmt='%.5f')
         np.savetxt(fp, np.hstack((3 * np.ones((
             faces.shape[0], 1)), faces)), fmt='%d')
+
+
+def merge_meshes(*args):
+    v = np.concatenate([item['v'] for item in args], axis=0)
+    offsets = np.cumsum([0] + [item['v'].shape[0] for item in args])
+    f = np.concatenate([item['f'] + offset for item, offset in zip(args, offsets)], axis=0)
+    return {'v': v, 'f': f}
 
 
 def sha1(objs):

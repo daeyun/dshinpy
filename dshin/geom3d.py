@@ -1,5 +1,7 @@
 import itertools
+from os import path
 import tempfile
+import textwrap
 import os
 import numpy as np
 import matplotlib.pyplot as pt
@@ -38,7 +40,8 @@ def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
     return ax
 
 
-def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None, colorbar=False, cmap=None, is_radians=False):
+def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None, colorbar=False, cmap=None,
+        is_radians=False):
     if ax is None:
         fig = pt.figure()
         # ax = fig.add_subplot(111, projection='3d')
@@ -51,6 +54,9 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         if is_radians:
             cam_sph = cam_sph / np.pi * 180
         ax.view_init(elev=90 - cam_sph[1], azim=cam_sph[2])
+
+    if pts.ndim > 1 and pts.shape[0] == 1:
+        reset_limits = False
 
     if type(lim) == list:
         lim = np.array(lim)
@@ -174,8 +180,8 @@ def draw_xyz_axes():
     ax = draw_arrow_3d(start_pts, end_pts, texts=['x', 'y', 'z'], colors=['r', 'g', 'b'])
     ax.set_aspect('equal')
 
-    bmin = [-1,-1,-1]
-    bmax = [1,1,1]
+    bmin = [-1, -1, -1]
+    bmax = [1, 1, 1]
     ax.set_xlim([bmin[0], bmax[0]])
     ax.set_ylim([bmin[1], bmax[1]])
     ax.set_zlim([bmin[2], bmax[2]])
@@ -208,9 +214,10 @@ def draw_camera(Rt, ax=None, scale=10):
     return ax
 
 
-def draw_cameras(cameras, ax):
+def draw_cameras(cameras, ax=None, scale=0.1):
     for camera in cameras:
-        draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=0.1)
+        ax = draw_camera(np.hstack((camera.s * camera.R, camera.t)), ax=ax, scale=scale)
+    return ax
 
 
 def plot_mesh(mesh, ax=None):
@@ -255,7 +262,17 @@ def set_lims(ax, bb):
     pts(np.array([bmax, bmin]), ax=ax, markersize=0)
 
 
-def open_in_meshlab(verts, faces):
+def open_in_meshlab_single(verts_or_mesh, faces=None):
+    if faces is None:
+        assert isinstance(verts_or_mesh, dict)
+        verts = verts_or_mesh['v']
+        faces = verts_or_mesh['f']
+    else:
+        verts = verts_or_mesh
+
+    assert isinstance(verts, np.ndarray)
+    assert isinstance(faces, np.ndarray)
+
     with tempfile.NamedTemporaryFile(prefix='mesh_', suffix='.off',
                                      delete=False) as fp:
         fp.write('OFF\n{} {} 0\n'.format(verts.shape[0], faces.shape[0]).encode(
@@ -265,3 +282,48 @@ def open_in_meshlab(verts, faces):
                    fmt='%d')
         fname = fp.name
     os.system('while [ ! -f {fname} ]; do sleep 0.5; done; meshlab {fname}'.format(fname=fname))
+
+
+def open_in_meshlab(meshes):
+    if not isinstance(meshes, (list, tuple)):
+        meshes = [meshes]
+
+    filenames = []
+    for i, mesh in enumerate(meshes):
+        verts = mesh['v']
+        faces = mesh['f']
+        assert isinstance(verts, np.ndarray)
+        assert isinstance(faces, np.ndarray)
+        with tempfile.NamedTemporaryFile(prefix='mesh_{}'.format(i), suffix='.off', delete=False) as fp:
+            fp.write('OFF\n{} {} 0\n'.format(verts.shape[0], faces.shape[0]).encode('utf-8'))
+            np.savetxt(fp, verts, fmt='%.5f')
+            np.savetxt(fp, np.hstack((3 * np.ones((faces.shape[0], 1)), faces)), fmt='%d')
+            filenames.append(fp.name)
+
+    sections = []
+    for i, filename in enumerate(filenames):
+        # NOTE(daeyun): A space character is required at the end of each matrix row line.
+        sections.append(textwrap.dedent("""
+        <MLMesh label="{}" filename="{}">
+        {}
+        </MLMesh>
+        """).strip().format(i, filename, '<MLMatrix44>\n1 0 0 0 \n0 1 0 0 \n0 0 1 0 \n0 0 0 1 \n</MLMatrix44>'))
+
+    projfile_content = textwrap.dedent("""
+    <!DOCTYPE MeshLabDocument>
+    <MeshLabProject>
+    <MeshGroup>
+    {}
+    </MeshGroup>
+    <RasterGroup/>
+    </MeshLabProject>
+    """).strip().format('\n'.join(sections))
+
+    with tempfile.NamedTemporaryFile(prefix='meshlab_proj_', suffix='.mlp', delete=False) as fp:
+        fp.write(projfile_content.encode('utf-8'))
+        projfile = fp.name
+    print(projfile)
+
+    os.system('while [ ! -f {fname} ]; do sleep 0.5; done; meshlab {fname}'.format(fname=projfile))
+
+    return projfile

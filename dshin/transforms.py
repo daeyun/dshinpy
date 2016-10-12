@@ -9,7 +9,7 @@ from dshin import camera
 from dshin import log
 
 
-def translate(M, x, y=None, z=None):
+def translate(x_or_xyz, y=None, z=None):
     """
     translate produces a translation by (x, y, z) .
     http://www.labri.fr/perso/nrougier/teaching/opengl/
@@ -19,17 +19,21 @@ def translate(M, x, y=None, z=None):
     x, y, z
         Specify the x, y, and z coordinates of a translation vector.
     """
-    if y is None: y = x
-    if z is None: z = x
+    if isinstance(x_or_xyz, np.ndarray):
+        assert x_or_xyz.size == 3
+        x, y, z = x_or_xyz
+    else:
+        x = x_or_xyz
+        if y is None: y = x
+        if z is None: z = x
     T = [[1, 0, 0, x],
          [0, 1, 0, y],
          [0, 0, 1, z],
          [0, 0, 0, 1]]
-    T = np.array(T, dtype=np.float64).T
-    M[...] = np.dot(M, T)
+    return np.array(T, dtype=np.float64)
 
 
-def scale(M, x, y=None, z=None):
+def scale(x, y=None, z=None):
     """
     scale produces a non uniform scaling along the x, y, and z axes. The three
     parameters indicate the desired scale factor along each of the three axes.
@@ -46,8 +50,7 @@ def scale(M, x, y=None, z=None):
          [0, y, 0, 0],
          [0, 0, z, 0],
          [0, 0, 0, 1]]
-    S = np.array(S, dtype=np.float64).T
-    M[...] = np.dot(M, S)
+    return np.array(S, dtype=np.float64)
 
 
 def xrotate(theta, deg=True):
@@ -55,7 +58,7 @@ def xrotate(theta, deg=True):
     http://www.labri.fr/perso/nrougier/teaching/opengl/
     """
     if deg:
-        theta = np.rad2deg(theta)
+        theta = np.deg2rad(theta)
 
     is_batch = (isinstance(theta, np.ndarray) and theta.size > 1) or np.array(theta).size > 1
 
@@ -83,7 +86,7 @@ def yrotate(theta, deg=True):
     http://www.labri.fr/perso/nrougier/teaching/opengl/
     """
     if deg:
-        theta = math.pi * theta / 180.0
+        theta = np.deg2rad(theta)
     cosT = math.cos(theta)
     sinT = math.sin(theta)
     R = numpy.array(
@@ -99,7 +102,7 @@ def zrotate(theta, deg=True):
     http://www.labri.fr/perso/nrougier/teaching/opengl/
     """
     if deg:
-        theta = np.rad2deg(theta)
+        theta = np.deg2rad(theta)
 
     is_batch = (isinstance(theta, np.ndarray) and theta.size > 1) or np.array(theta).size > 1
 
@@ -122,6 +125,52 @@ def zrotate(theta, deg=True):
     return R
 
 
+def unit_vector_(data, axis=None, out=None):
+    """
+    http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
+    """
+    if out is None:
+        data = numpy.array(data, dtype=numpy.float64, copy=True)
+        if data.ndim == 1:
+            data /= math.sqrt(numpy.dot(data, data))
+            return data
+    else:
+        if out is not data:
+            out[:] = numpy.array(data, copy=False)
+        data = out
+    length = numpy.atleast_1d(numpy.sum(data * data, axis))
+    numpy.sqrt(length, length)
+    if axis is not None:
+        length = numpy.expand_dims(length, axis)
+    data /= length
+    if out is None:
+        return data
+
+
+def rotation_matrix2(angle, direction, point=None):
+    """
+    http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
+    """
+    angle = angle / 180 * np.pi
+    sina = math.sin(angle)
+    cosa = math.cos(angle)
+    direction = unit_vector_(direction[:3])
+    # rotation matrix around unit vector
+    R = numpy.diag([cosa, cosa, cosa])
+    R += numpy.outer(direction, direction) * (1.0 - cosa)
+    direction *= sina
+    R += numpy.array([[0.0, -direction[2], direction[1]],
+                      [direction[2], 0.0, -direction[0]],
+                      [-direction[1], direction[0], 0.0]])
+    M = numpy.identity(4)
+    M[:3, :3] = R
+    if point is not None:
+        # rotation not around origin
+        point = numpy.array(point[:3], dtype=numpy.float64, copy=False)
+        M[:3, 3] = point - numpy.dot(R, point)
+    return M
+
+
 def rotation_matrix(angle, direction, point=None, deg=True):
     """
     Based on http://www.lfd.uci.edu/~gohlke/code/transformations.py.html
@@ -135,7 +184,7 @@ def rotation_matrix(angle, direction, point=None, deg=True):
             assert point.shape[1] == 3
 
     if deg:
-        angle = np.rad2deg(angle)
+        angle = np.deg2rad(angle)
 
     if np.issubdtype(direction.dtype, np.integer):
         direction = direction.astype(np.float64)
@@ -158,6 +207,8 @@ def rotation_matrix(angle, direction, point=None, deg=True):
         if np.any(np.isnan(axis)):
             return np.eye(4)
 
+        if isinstance(cosa, numpy.ndarray):
+            cosa = float(cosa)
         R = numpy.diag([cosa, cosa, cosa])
         R += numpy.outer(axis, axis) * (1.0 - cosa)
         axis *= sina
@@ -404,14 +455,14 @@ def quaternion_matrix(quaternion):
         [0.0, 0.0, 0.0, 1.0]])
 
 
-def random_rotation(is_homogeneous=False):
+def random_rotation(return_4x4=False):
     v = np.random.randn(4)
     Q = quaternion_matrix(v / la.norm(v, ord=2))
 
     assert np.isclose(la.det(Q), 1.0)
     assert np.isclose(Q[3, 3], 1.0)
 
-    return Q if is_homogeneous else Q[:3, :3]
+    return Q if return_4x4 else Q[:3, :3]
 
 
 def xyz_to_sph(xyz):
@@ -438,20 +489,37 @@ def sph_to_xyz(sph):
     return xyz
 
 
+def unit_vector(vec) -> np.ndarray:
+    if isinstance(vec, (list, tuple)):
+        vec = np.array(vec)
+
+    if vec.ndim == 1:
+        return vec / la.norm(vec, ord=2)
+    elif vec.ndim == 2:
+        return vec / la.norm(vec, ord=2, axis=1, keepdims=True)
+    else:
+        raise NotImplementedError()
+
+
 def spherical_coord_align_rotation(v1, v2):
-    a = v1.copy()
-    b = v2.copy()
-    a = a / la.norm(a, 2)
-    b = b / la.norm(a, 2)
+    """
+    Returns a rotation matrix that aligns v1 to v2 such that the rotation can be parametrized as spherical coordinates.
+    i.e. Rotates freely around the z-axis, and then adjusts elevation.
+    :param v1: Source vector.
+    :param v2: Target vector.
+    :return: Rotation matrix.
+    """
+    a = unit_vector(v1)
+    b = unit_vector(v2)
     a[2] = b[2] = 0
-    azimuth = angle(a, b, deg=True, ref_plane=np.array([0, 0, 1]))
-    assert -180 <= azimuth <= 180
-    xyrot = zrotate(azimuth, deg=True)[:3, :3]
+    azimuth = angle(a, b, deg=False, ref_plane=np.array([0, 0, 1]))
+    assert -np.pi <= azimuth <= np.pi
+    xyrot = zrotate(azimuth, deg=False)[:3, :3]
     vs = v1.dot(xyrot.T)
     elaxis = np.cross(vs, v2)
-    elevation = angle(vs, v2, deg=True, ref_plane=elaxis)
-    assert -90 <= elevation <= 90
-    elrot = rotation_matrix(elevation, elaxis, deg=True)[:3, :3]
+    elevation = angle(vs, v2, deg=False, ref_plane=elaxis)
+    assert -np.pi / 2 <= elevation <= np.pi / 2
+    elrot = rotation_matrix(elevation, elaxis, deg=False)[:3, :3]
     Q = elrot.dot(xyrot)
     assert np.allclose(la.det(Q), 1.0)
     return Q
@@ -595,3 +663,8 @@ def normalize_depth_image(image, hw=(64, 64)):
     # Returns a mean-centered image.
     resized_image -= resized_image[valid].mean()
     return resized_image
+
+
+def apply44_mesh(T, mesh):
+    v = apply44(T, mesh['v'])
+    return {'v': v, 'f': mesh['f'].copy()}

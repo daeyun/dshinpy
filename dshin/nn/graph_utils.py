@@ -12,6 +12,7 @@ import textwrap
 
 from IPython import display
 from google.protobuf import text_format
+from google import protobuf
 
 
 class IPythonTfGraph(object):
@@ -355,3 +356,28 @@ def find_dependencies(tensors, return_ops=False):
     if return_ops:
         return list(tensors.values()), list(operations.values())
     return list(tensors.values())
+
+
+def assert_valid_checkpoint(checkpoint_path):
+    with open(checkpoint_path, 'rb') as f:
+        head = f.read(2)
+        assert head == b'\x00\x00'
+
+
+def write_new_checkpoint_state(dirname, checkpoint_path, is_verbose=True):
+    checkpoint_path = path.abspath(path.expanduser(checkpoint_path))
+    dirname = path.abspath(path.expanduser(dirname))
+    assert_valid_checkpoint(checkpoint_path)
+
+    checkpoint_state = tf.train.generate_checkpoint_state_proto(dirname, checkpoint_path, [checkpoint_path])
+    text = protobuf.text_format.MessageToString(checkpoint_state)
+    out_filename = path.join(dirname, 'checkpoint')
+    if is_verbose:
+        if path.exists(out_filename):
+            log.info('Overwriting an existing checkpoint state file: {} with model path {}'.format(out_filename, checkpoint_path))
+        else:
+            log.info('Writing a checkpoint state file: {} with model path {}'.format(out_filename, checkpoint_path))
+    with open(out_filename, 'w') as f:
+        f.write(text)
+
+    return out_filename

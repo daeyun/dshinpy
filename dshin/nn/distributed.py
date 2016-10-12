@@ -42,7 +42,7 @@ def job_info_from_server_def(server_def):
 
 
 class TFProcess(mp.Process, metaclass=abc.ABCMeta):
-    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, log_dir, batch_size=None, session_config=None, gpu_ids=None):
+    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, log_dir, experiment_name=None, batch_size=None, session_config=None, gpu_ids=None):
         super().__init__()
         self.daemon = True
 
@@ -58,6 +58,7 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
         self._nnmodel_class = nnmodel_class
         self._batch_size = batch_size
         self._log_dir = log_dir
+        self._experiment_name = experiment_name
 
         self._session_config = session_config
         self._thread = threading.Thread(target=self._thread_main, daemon=True)

@@ -12,6 +12,8 @@ import tensorflow as tf
 import toposort
 import typing
 
+from google.protobuf import text_format
+
 from dshin import log
 from dshin.nn import graph_utils
 from dshin.nn import distributed
@@ -220,11 +222,14 @@ def sort_tensors(ops):
 class NNModel(metaclass=abc.ABCMeta):
     _source_queue_prefix = 'queue'
     _consumer_queue_prefix = 'worker_queue'
+    _source_queue_container_name = 'queue'
+    _consumer_queue_container_name = 'workerqueue'
     _saver_prefix = 'saver'
     _optimizer_prefix = 'optim'
     _meta_graph_suffix = '.meta'
     _checkpoint_basename = 'model.ckpt'  # Full path will be `{log_dir}/{_checkpoint_basename}`
     _summary_key_prefix = 'summary_'
+    _imported_model_prefix = 'import'
     _summary_keys = [
         'scalar',
         'image',
@@ -296,8 +301,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def default_variables(self):
         return [
-            tf.get_variable('global_step', shape=(), initializer=tf.constant_initializer(0, dtype=tf.int64), dtype=tf.int64, trainable=False),
-            tf.get_variable('learning_rate', shape=(), initializer=tf.constant_initializer(0.001, dtype=tf.float32), dtype=tf.float32, trainable=False),
+            tf.get_variable('global_step', shape=(), initializer=tf.constant_initializer(0, dtype=tf.int64),
+                            dtype=tf.int64, trainable=False),
+            tf.get_variable('learning_rate', shape=(), initializer=tf.constant_initializer(0.001, dtype=tf.float32),
+                            dtype=tf.float32, trainable=False),
         ]
 
     def _init_summaries(self):
@@ -362,16 +369,18 @@ class NNModel(metaclass=abc.ABCMeta):
 
             return queue_components
 
-        all_queue_components = [build_queue(name, size) for name, size in zip(queue_names, queue_sizes)]
+        with tf.container(self._source_queue_container_name):
+            all_queue_components = [build_queue(name, size) for name, size in zip(queue_names, queue_sizes)]
 
-        consumer_name = '{}'.format(NNModel._consumer_queue_prefix)
+            consumer_name = '{}'.format(NNModel._consumer_queue_prefix)
 
-        tensor_dict = self._build_batch_tensors(name=consumer_name,
-                                                batch_size=batch_size,
-                                                queue_size=local_queue_size,
-                                                placeholder_specs=placeholder_specs,
-                                                all_source_queue_components=all_queue_components,
-                                                local_device=self.local_device_name())
+        with tf.container(self._consumer_queue_container_name):
+            tensor_dict = self._build_batch_tensors(name=consumer_name,
+                                                    batch_size=batch_size,
+                                                    queue_size=local_queue_size,
+                                                    placeholder_specs=placeholder_specs,
+                                                    all_source_queue_components=all_queue_components,
+                                                    local_device=self.local_device_name())
         log.info('Built local queue: %s', tensor_dict)
 
         with tf.name_scope('placeholder/'):
@@ -431,7 +440,9 @@ class NNModel(metaclass=abc.ABCMeta):
               parallel_read_size=20,
               seed=None,
               sync_replicas=True,
-              save_model_secs=600):
+              save_model_secs=600,
+              from_model_checkpoint=None,
+              from_meta_graph=None):
         assert self.needs_initialization
 
         if server is None:
@@ -457,6 +468,9 @@ class NNModel(metaclass=abc.ABCMeta):
         if self.log_dir:
             log.add_file_handler(path.join(self.log_dir, 'out.log'))
 
+            if from_model_checkpoint is not None:
+                graph_utils.write_new_checkpoint_state(self.log_dir, from_model_checkpoint)
+
         self.cluster_spec = tf.train.ClusterSpec(server.server_def.cluster)
 
         if self.job_name == 'ps':
@@ -478,7 +492,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
         worker_device_name = self.local_device_name()
         log.info('[%s %d] Device name is %s', self.job_name, self.task_id, worker_device_name)
-        device_setter = tf.train.replica_device_setter(worker_device=worker_device_name, cluster=server.server_def.cluster)
+        device_setter = tf.train.replica_device_setter(worker_device=worker_device_name,
+                                                       cluster=server.server_def.cluster)
 
         with self.graph.as_default(), tf.device(device_setter):
             if seed is not None:
@@ -487,8 +502,79 @@ class NNModel(metaclass=abc.ABCMeta):
 
             self._build_input_pipeline(self.queue_names, self.queue_sizes, self.local_queue_size)
 
-            # Builds the main model.
-            loss = self._model()
+            if from_meta_graph:
+                raise NotImplementedError()
+                assert isinstance(from_meta_graph, str)
+                imported_graph = tf.Graph()
+                with imported_graph.as_default():
+                    tf.train.import_meta_graph(from_meta_graph, clear_devices=True)
+                exclude_prefixes = [
+                    self._consumer_queue_prefix,
+                    self._saver_prefix,
+                    self._optimizer_prefix,
+                    self._source_queue_prefix,
+                    self._saver_prefix,
+                    'Adam',  # TODO(daeyun)
+                ]
+                whitelisted = {
+                    '{}/queue'.format(self._consumer_queue_prefix),
+                    '{}/dequeue'.format(self._consumer_queue_prefix),
+                }
+                # for existing_node in self.graph.as_graph_def().node:
+                #     exclude_prefixes.append(existing_node.name)
+                new_graph_def = tf.GraphDef()
+                names = set()
+                imported_graph_def = imported_graph.as_graph_def()
+                for node in imported_graph_def.node:
+                    for input_name in node.input:
+                        if input_name.startswith('^{}/minimize'.format(self._optimizer_prefix)):
+                            continue
+                    for prefix in exclude_prefixes:
+                        if node.name.startswith(prefix) and node.name not in whitelisted:
+                            continue
+                    new_node = new_graph_def.node.add()
+                    new_node.CopyFrom(node)
+                    new_node.device = ''
+                    names.add(node.name)
+
+                with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+                    tf.import_graph_def(new_graph_def, name=self._imported_model_prefix)
+
+                all_operations = self.graph.get_operations()
+                all_tensors = []
+                for op in all_operations:
+                    all_tensors.extend(op.outputs)
+                all_names = {}
+                for item in all_operations + all_tensors:
+                    all_names[item.name] = item
+                variables = (imported_graph.get_collection(tf.GraphKeys.VARIABLES) +
+                             imported_graph.get_collection(tf.GraphKeys.LOCAL_VARIABLES) +
+                             imported_graph.get_collection(tf.GraphKeys.MODEL_VARIABLES) +
+                             imported_graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES) +
+                             imported_graph.get_collection(tf.GraphKeys.MOVING_AVERAGE_VARIABLES))
+                variables = {item.name: item for item in variables}
+                for key in imported_graph.get_all_collection_keys():
+                    for item in imported_graph.get_collection(key):
+                        if 'weight' in item.name:
+                            print(item.name, '{}/{}'.format(self._imported_model_prefix, item.name) in all_names)
+                        if '{}/{}'.format(self._imported_model_prefix, item.name) in all_names:
+                            value = all_names['{}/{}'.format(self._imported_model_prefix, item.name)]
+                            if isinstance(item, tf.Variable):
+                                self.graph.add_to_collection(key, variables[value.name])
+                            else:
+                                self.graph.add_to_collection(key, value)
+                final_loss_collection = self.graph.get_collection('final_loss')
+                if len(final_loss_collection) == 1:
+                    loss = final_loss_collection[0]
+                else:
+                    loss = self.graph.get_tensor_by_name('{}/loss_all:0'.format(self._imported_model_prefix))
+                    log.warn('Imported {} as the value to minimize.'.format(loss.name))
+
+            else:
+                # Builds the main model.
+                loss = self._model()
+                tf.add_to_collection('final_loss', loss)
+
             assert isinstance(loss, tf.Tensor), '_model() must return a Tensor for the total loss.'
 
             with tf.variable_scope(self._optimizer_prefix):
@@ -523,11 +609,12 @@ class NNModel(metaclass=abc.ABCMeta):
                 set_chief_ready = tf.assign(is_chief_ready, True, use_locking=True, name='set_chief_ready')
 
             # Exclude any queue-specific variables.
-            # TODO(daeyun): exclude local steps.
             vars_to_save = []
             for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
                 for name in self.queue_names:
-                    if var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)) or 'is_chief_ready' in var.name:
+                    if (var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)) or
+                            ('is_chief_ready' in var.name) or
+                            ('minimize/local_steps' in var.name)):
                         break
                 else:
                     vars_to_save.append(var)
@@ -745,7 +832,8 @@ class NNModel(metaclass=abc.ABCMeta):
                     # For now, assume they always have only one key named 'data'.
                     assert len(npz_fields) == 1
                     input_spec = npz_fields.pop()
-                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype, shape=[parallel_read_size] + list(input_spec.shape[1:]), key='data')
+                    value = nn_ops.npz_to_tensor(value, dtype=input_spec.dtype,
+                                                 shape=[parallel_read_size] + list(input_spec.shape[1:]), key='data')
                     tensors[placeholder_name] = value
                 elif tf_record_fields:
                     # TODO(daeyun): Refactor this block into a separate function.
@@ -755,7 +843,8 @@ class NNModel(metaclass=abc.ABCMeta):
                         assert value.get_shape()[0].value == parallel_read_size
                         parallel_serialized = []
                         for i, reader in enumerate(self._tf_record_readers[:parallel_read_size]):
-                            q = tf.FIFOQueue(capacity=parallel_read_size, dtypes=tf.string, name='filename_queue/{}'.format(i))
+                            q = tf.FIFOQueue(capacity=parallel_read_size, dtypes=tf.string,
+                                             name='filename_queue/{}'.format(i))
                             # Enqueue and dequeue immediately. `tf.TFRecordReader.read` requires a queue as input.
                             # `value` is one of the filename values atomically dequeued from the source queue.
                             with tf.control_dependencies([q.enqueue(value[i])]):
@@ -791,7 +880,8 @@ class NNModel(metaclass=abc.ABCMeta):
                                         tensor = tf.cast(decoded, dtype=tf.bool)
                                     else:
                                         # Assume little-endian. NOTE: Network byte order is big-endian.
-                                        tensor = tf.decode_raw(bytes=tensor, out_type=input_spec.dtype, little_endian=True)
+                                        tensor = tf.decode_raw(bytes=tensor, out_type=input_spec.dtype,
+                                                               little_endian=True)
                                 # Raises error at runtime if shapes are incompatible.
                                 tensor = tf.reshape(tensor, shape=[parallel_read_size] + list(input_spec.shape[1:]))
                             tensors[placeholder_name] = tensor
@@ -838,7 +928,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
         return qr
 
-    def _build_batch_tensors(self, name, batch_size, queue_size, placeholder_specs, all_source_queue_components: typing.Sequence[QueueComponents], local_device):
+    def _build_batch_tensors(self, name, batch_size, queue_size, placeholder_specs,
+                             all_source_queue_components: typing.Sequence[QueueComponents], local_device):
         """
         Returns a batched tensor that pulls and concatenates values from the source queue upon evaluation.
 
@@ -868,7 +959,8 @@ class NNModel(metaclass=abc.ABCMeta):
                 types.append(spec.dtype)
                 shapes.append(spec.shape[1:])
                 names.append(spec.name)
-            queue = tf.FIFOQueue(capacity=queue_size, dtypes=types, shapes=shapes, names=names, shared_name=None, name='queue')
+            queue = tf.FIFOQueue(capacity=queue_size, dtypes=types, shapes=shapes, names=names, shared_name=None,
+                                 name='queue')
 
             # `worker_queue/size:0`.
             self._local_queue_size_tensor = queue.size('size')
@@ -882,9 +974,11 @@ class NNModel(metaclass=abc.ABCMeta):
 
                 with tf.variable_scope('{}'.format(basename)):
                     # Enqueue to the local destination queue.
-                    parallel_enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue, placeholder_specs, local_device,
+                    parallel_enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue,
+                                                                     placeholder_specs, local_device,
                                                                      parallel_read_size=self.parallel_read_size)
-                    enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue, placeholder_specs, local_device, parallel_read_size=1)
+                    enqueue_op = self._build_local_fetch_op(source_queue_components.queue, queue, placeholder_specs,
+                                                            local_device, parallel_read_size=1)
                     qr = CountingQueueRunner(queue, enqueue_op=enqueue_op, parallel_enqueue_op=parallel_enqueue_op,
                                              parallel_enqueue_size=self.parallel_read_size, name=basename)
                     self._consumer_queue_runners[basename] = qr
@@ -1088,7 +1182,8 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         assert self.job_name in ('worker', 'local')
         # summary_writer_name should be 'train' by default.
-        self.eval([], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys, check_placeholder_coverage=check_placeholder_coverage, run_options=run_options)
+        self.eval([], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys,
+                  check_placeholder_coverage=check_placeholder_coverage, run_options=run_options)
 
     def enqueue(self, name, feed_dict: dict):
         assert not self.needs_initialization, 'Variables are not initialized.'
@@ -1261,16 +1356,19 @@ class NNModel(metaclass=abc.ABCMeta):
         if will_dequeue:
             batch_size_ph = self.placeholder('batch_size')
             if batch_size_ph not in new_feed_dict:
-                raise ValueError('{} has a dequeue dependency and batch_size placeholder is missing.'.format(dequeuing_value.name))
+                raise ValueError(
+                    '{} has a dequeue dependency and batch_size placeholder is missing.'.format(dequeuing_value.name))
             batch_size_value = new_feed_dict[batch_size_ph]
 
             if self._current_source_queue_name is None:
-                raise BlockingIOError('Current source queue is not specified. Did you forget to call `.start_local_queue_runners()`?')
+                raise BlockingIOError(
+                    'Current source queue is not specified. Did you forget to call `.start_local_queue_runners()`?')
             i = 0
             while True:
                 local_queue_size = self.current_queue_size()
                 if local_queue_size < batch_size_value:
-                    log.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(local_queue_size, batch_size_value))
+                    log.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(
+                        local_queue_size, batch_size_value))
 
                 if local_queue_size > 0:
                     break
@@ -1280,7 +1378,8 @@ class NNModel(metaclass=abc.ABCMeta):
                         if thread.is_alive():
                             break
                     else:
-                        raise BlockingIOError('Worker queue is empty and queue runner threads are not running. Did you forget to call `.start_local_queue_runners()`?')
+                        raise BlockingIOError(
+                            'Worker queue is empty and queue runner threads are not running. Did you forget to call `.start_local_queue_runners()`?')
                 log.info('Worker queue is empty. Waiting for data from global queue "{}" (size {}).'.format(
                     self._current_source_queue_name, self.source_queue_size(self._current_source_queue_name)))
                 time.sleep(min(0.4 * (i + 1), 3))
@@ -1389,7 +1488,8 @@ class NNModel(metaclass=abc.ABCMeta):
             save_path = self.checkpoint_filename()
         assert isinstance(save_path, str)
         assert not self.needs_initialization
-        assert not path.isdir(save_path) and not save_path.endswith('/'), 'save_path must be a file: {}'.format(save_path)
+        assert not path.isdir(save_path) and not save_path.endswith('/'), 'save_path must be a file: {}'.format(
+            save_path)
 
         directory = path.dirname(save_path)
         if not path.isdir(directory):
@@ -1451,7 +1551,8 @@ class NNModel(metaclass=abc.ABCMeta):
         assert set(summary_keys).issubset(self._summary_keys)
 
         with tf.name_scope('histogram_summary_value') as scope:
-            concat_value = tf.concat(0, [tf.reshape(v, [-1]) if v.get_shape().ndims > 0 else v for v in values], name=scope)
+            concat_value = tf.concat(0, [tf.reshape(v, [-1]) if v.get_shape().ndims > 0 else v for v in values],
+                                     name=scope)
 
         with_default_summary_keys = list(summary_keys) + ['histogram']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
@@ -1459,7 +1560,8 @@ class NNModel(metaclass=abc.ABCMeta):
         summary_op = tf.histogram_summary(tag=tag, name=name, values=concat_value, collections=collection_keys)
         return summary_op
 
-    def add_image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, summary_keys=(), name: str = None) -> tf.Tensor:
+    def add_image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, summary_keys=(),
+                          name: str = None) -> tf.Tensor:
         """
         A wrapper around `tf.image_summary` that prints out logs and adds to the image collection.
 
@@ -1485,7 +1587,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['image']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape, ','.join(collection_keys), max_images)
+        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape,
+                 ','.join(collection_keys), max_images)
         summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collection_keys, name=name)
         return summary_op
 
@@ -1500,7 +1603,8 @@ class NNModel(metaclass=abc.ABCMeta):
             tensors = list(op.inputs)
         target_name = '{}/dequeue'.format(self._consumer_queue_prefix)
         for v in graph_utils.find_dependencies(tensors):
-            if target_name in v.name and len(placeholder_names.intersection([item.name for item in v.consumers()])) == 0:
+            if target_name in v.name and len(
+                    placeholder_names.intersection([item.name for item in v.consumers()])) == 0:
                 return True
 
 

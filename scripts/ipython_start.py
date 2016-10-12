@@ -48,6 +48,7 @@ import collections
 import contextlib
 import copy
 import functools
+import glob
 import itertools
 import math
 import multiprocessing as mp
@@ -158,3 +159,8 @@ def import_optional(module_name, alias=None, is_verbose=False):
 
 import_optional('tflearn')
 import_optional('tqdm')
+
+# Aliases
+
+arr = np.array
+norm = la.norm
