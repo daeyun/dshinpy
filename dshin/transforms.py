@@ -349,6 +349,15 @@ def ortho44(left, right, bottom, top, znear, zfar):
     ], dtype=np.float64)
 
 
+def apply34(M, pts):
+    assert 2 == len(pts.shape)
+    assert pts.shape[1] == 3
+
+    assert M.shape == (3, 4)
+    Mpts = M.dot(np.vstack((pts.T, np.ones((1, pts.shape[0])))))
+    return Mpts.T
+
+
 def apply44(M, pts):
     assert 2 == len(pts.shape)
     assert pts.shape[1] == 3
@@ -668,3 +677,27 @@ def normalize_depth_image(image, hw=(64, 64)):
 def apply44_mesh(T, mesh):
     v = apply44(T, mesh['v'])
     return {'v': v, 'f': mesh['f'].copy()}
+
+
+def apply34_mesh(T, mesh):
+    v = apply34(T, mesh['v'])
+    return {'v': v, 'f': mesh['f'].copy()}
+
+
+def find_similarity_transform(source_points, target_points):
+    source_centroid = source_points.mean(0)
+    target_centroid = target_points.mean(0)
+
+    source_recentered = source_points - source_centroid
+    target_recentered = target_points - target_centroid
+
+    scale = la.norm(target_recentered, ord=2, axis=1).max() / la.norm(source_recentered, ord=2, axis=1).max()
+
+    u, _, vt = la.svd(source_recentered.T.dot(target_recentered))
+
+    R = vt.T.dot(u.T)
+    t = target_centroid - R.dot(source_centroid * scale)
+
+    M = np.hstack([scale * R, t[:, None]])
+
+    return R, scale, t, M

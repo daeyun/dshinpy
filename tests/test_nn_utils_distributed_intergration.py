@@ -172,7 +172,7 @@ class Worker(multiprocessing.Process):
         self.barrier('build')
         time.sleep(1)
 
-        net.start_local_queue_runners('train', 40, num_threads=30)
+        net.request_data_from_queue('train', 40, num_threads=30)
         net.join_local_queue_runner_threads('train')
         assert net.eval('worker_queue/size') == 40
 
@@ -181,7 +181,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 0
 
         self.barrier('populate')
-        net.start_local_queue_runners('train', 60, num_threads=10)
+        net.request_data_from_queue('train', 60, num_threads=10)
         net.join_local_queue_runner_threads('train')
         assert net.eval('worker_queue/size') == 100
 
@@ -190,7 +190,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 0
 
         self.barrier('populate')
-        net.start_local_queue_runners('train2', 5, num_threads=10)
+        net.request_data_from_queue('train2', 5, num_threads=10)
         net.join_local_queue_runner_threads()
         assert net.eval('worker_queue/size') == 105
 
@@ -201,7 +201,7 @@ class Worker(multiprocessing.Process):
         self.barrier('prepare_queue')
 
         # Not joining until the end.
-        net.start_local_queue_runners('train2', 5, num_threads=10)
+        net.request_data_from_queue('train2', 5, num_threads=10)
 
         data = self.data()
 
@@ -291,7 +291,7 @@ class Worker(multiprocessing.Process):
         assert net.eval('queue/train2/count') == 10 * self.num_workers
         self.barrier('populate')
 
-        net.start_local_queue_runners('train', 40, num_threads=1)
+        net.request_data_from_queue('train', 40, num_threads=1)
         net.join_local_queue_runner_threads('train')
         expected_worker_queue_size += 40
         assert net.eval('worker_queue/size') == expected_worker_queue_size

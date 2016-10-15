@@ -136,7 +136,7 @@ def test_save_and_restore_no_summary(bn_net: nn.model_utils.NNModel, tmpdir: loc
     restore()
     assert np.isclose(net.current_learning_rate(), 0.0015)
 
-    net = bn_net_factory(net.log_dir)
+    net = bn_net_factory(net.logdir)
     # already restored.
     assert np.isclose(net.current_learning_rate(), 0.0015)
     restore(net)
@@ -153,24 +153,24 @@ def test_save_and_restore_with_summary(bn_net: nn.model_utils.NNModel, tmpdir: l
         return restored
 
     def train(bn_net):
-        bn_net.train({'input': data['input'], 'target': data['target']},
-                     summary_keys=['scalar'])
+        bn_net.train_step({'input': data['input'], 'target': data['target']},
+                          summary_keys=['scalar'])
 
     def loss(bn_net, summary_writer_name=None):
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']},
                            summary_writer_name=summary_writer_name, summary_keys=['scalar', 'image'])['loss']
 
-    assert path.isdir(path.join(bn_net.log_dir, 'summary'))
-    assert path.isdir(path.join(bn_net.log_dir, 'summary', 'train'))
-    assert not path.isdir(path.join(bn_net.log_dir, 'summary', 'eval'))
+    assert path.isdir(path.join(bn_net.logdir, 'summary'))
+    assert path.isdir(path.join(bn_net.logdir, 'summary', 'train'))
+    assert not path.isdir(path.join(bn_net.logdir, 'summary', 'eval'))
 
     save(bn_net)
     train(bn_net)
-    bn_net = restore(logdir=bn_net.log_dir)
+    bn_net = restore(logdir=bn_net.logdir)
     loss(bn_net, 'eval')
 
     # Assume summary files are flushed.
-    assert not path.isdir(path.join(bn_net.log_dir, 'summary', 'eval'))
+    assert not path.isdir(path.join(bn_net.logdir, 'summary', 'eval'))
 
     train(bn_net)
 
@@ -188,7 +188,7 @@ def test_save_and_restore_global_step(bn_net: nn.model_utils.NNModel, tmpdir: lo
         return restored
 
     def train(bn_net):
-        bn_net.train({'input': data['input'], 'target': data['target']})
+        bn_net.train_step({'input': data['input'], 'target': data['target']})
 
     def loss(bn_net):
         return bn_net.eval(['loss'], {'input': data['input'], 'target': data['target']})['loss']
@@ -202,7 +202,7 @@ def test_save_and_restore_global_step(bn_net: nn.model_utils.NNModel, tmpdir: lo
     train(bn_net)
     assert bn_net.eval('global_step') == 2
 
-    bn_net = restore(bn_net.log_dir)
+    bn_net = restore(bn_net.logdir)
     assert bn_net.eval('global_step') == 1
 
     train(bn_net)
@@ -214,7 +214,7 @@ def test_save_and_restore_global_step(bn_net: nn.model_utils.NNModel, tmpdir: lo
 
 def test_save_graph_summary_on_error(bn_net: nn.model_utils.NNModel, tmpdir: local.LocalPath, data):
     net = bn_net
-    assert not path.isfile(path.join(net.log_dir, 'graph_summary.txt'))
+    assert not path.isfile(path.join(net.logdir, 'graph_summary.txt'))
     with pytest.raises(Exception):
         net.tensor('non_existant_key_392')
-    assert path.isfile(path.join(net.log_dir, 'graph_summary.txt'))
+    assert path.isfile(path.join(net.logdir, 'graph_summary.txt'))

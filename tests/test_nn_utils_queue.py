@@ -164,7 +164,7 @@ def test_enqueue_array(net_no_file: nn.model_utils.NNModel, data):
     assert net.eval('worker_queue/size') == 0
     net.enqueue('train', feed_dict)
     assert net.eval('worker_queue/size') == 0
-    net.start_local_queue_runners('train', request_size=2, num_threads=1)
+    net.request_data_from_queue('train', max_size=2, num_threads=1)
 
     def assert_enqueue(num):
         assert net.eval('worker_queue/size') == num
@@ -186,7 +186,7 @@ def test_dequeue_array_eval(net_no_file: nn.model_utils.NNModel, data):
     net.enqueue('train', feed_dict)
     assert net.eval('worker_queue/size') == 0
 
-    net.start_local_queue_runners('train', request_size=2, num_threads=1)
+    net.request_data_from_queue('train', max_size=2, num_threads=1)
 
     def assert_enqueue(num):
         assert net.eval('worker_queue/size') == num
@@ -212,7 +212,7 @@ def test_dequeue_array_train(net_no_file: nn.model_utils.NNModel, data):
     train_feed_dict = {
         'batch_size': 2,
     }
-    net.start_local_queue_runners('train', request_size=8, num_threads=1)
+    net.request_data_from_queue('train', max_size=8, num_threads=1)
 
     def assert_enqueue(num):
         assert net.eval('worker_queue/size') == num
@@ -256,13 +256,13 @@ def test_enqueue_array_and_filename(net: nn.model_utils.NNModel, data, filenames
     def assert_enqueue():
         assert net.eval('worker_queue/size') == 2
 
-    net.start_local_queue_runners('train', 2)
+    net.request_data_from_queue('train', 2)
     retry_until(assert_enqueue, sec=2)
     net.join_local_queue_runner_threads()
 
 
 def test_dequeue_integrity(net: nn.model_utils.NNModel, data, filenames):
-    net.start_local_queue_runners('train', 1000)
+    net.request_data_from_queue('train', 1000)
     assert net.eval('worker_queue/size') == 0
 
     np.random.seed(9)
@@ -312,7 +312,7 @@ def test_dequeue_integrity(net: nn.model_utils.NNModel, data, filenames):
 
 
 def test_dequeue_atomic(net: nn.model_utils.NNModel, data, filenames):
-    net.start_local_queue_runners('train', 1000)
+    net.request_data_from_queue('train', 1000)
     assert net.eval('worker_queue/size') == 0
 
     np.random.seed(9)
