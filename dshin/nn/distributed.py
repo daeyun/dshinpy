@@ -42,7 +42,7 @@ def job_info_from_server_def(server_def):
 
 
 class TFProcess(mp.Process, metaclass=abc.ABCMeta):
-    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, log_dir, experiment_name=None, batch_size=None, session_config=None, gpu_ids=None):
+    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, logdir, experiment_name=None, batch_size=None, session_config=None, gpu_ids=None):
         super().__init__()
         self.daemon = True
 
@@ -57,13 +57,15 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
         self._gpu_ids = gpu_ids
         self._nnmodel_class = nnmodel_class
         self._batch_size = batch_size
-        self._log_dir = log_dir
+        self._logdir = logdir
         self._experiment_name = experiment_name
 
         self._session_config = session_config
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
 
         self._address = cluster_spec.task_address(self._job_name, self._task_id)
+
+        self.net = None
 
         self.log('Initialized process.')
 
@@ -117,18 +119,19 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
 
         server = self.new_server()
         if self._nnmodel_class is not None:
-            net = self._nnmodel_class(log_dir=self._log_dir)
+            net = self._nnmodel_class(logdir=self._logdir)
+            self.net = net
         else:
             net = None
         self._main(server, net)
 
-        if self._thread.is_alive():
-            self.log('Waiting for helper thread to finish.')
-        self._thread.join()
+        # if self._thread.is_alive():
+        #     self.log('Waiting for helper thread to finish.')
+        # self._thread.join()
 
 
 class ParameterServer(TFProcess):
-    def __init__(self, cluster_spec, task_id, log_dir=None, session_config=None, gpu_ids=None):
+    def __init__(self, cluster_spec, task_id, logdir=None, session_config=None, gpu_ids=None):
         if gpu_ids is None and 'CUDA_VISIBLE_DEVICES' not in os.environ:
             gpu_ids = ()
         super().__init__(
@@ -136,7 +139,7 @@ class ParameterServer(TFProcess):
             job_name='ps',
             task_id=task_id,
             nnmodel_class=None,
-            log_dir=log_dir,
+            logdir=logdir,
             session_config=session_config,
             gpu_ids=gpu_ids,
         )

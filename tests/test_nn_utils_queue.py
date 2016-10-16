@@ -172,7 +172,7 @@ def test_enqueue_array(net_no_file: nn.model_utils.NNModel, data):
     retry_until(assert_enqueue, 5, args=[1])
     net.enqueue('train', feed_dict)
     retry_until(assert_enqueue, 5, args=[2])
-    net.shutdown()
+    net.reset_graph()
 
 
 def test_dequeue_array_eval(net_no_file: nn.model_utils.NNModel, data):
@@ -308,7 +308,7 @@ def test_dequeue_integrity(net: nn.model_utils.NNModel, data, filenames):
     dequeue_and_verify(expected_remaining)
     assert net.eval('worker_queue/size') == 0
 
-    net.shutdown()
+    net.reset_graph()
 
 
 def test_dequeue_atomic(net: nn.model_utils.NNModel, data, filenames):
@@ -365,7 +365,7 @@ def test_dequeue_atomic(net: nn.model_utils.NNModel, data, filenames):
     dequeue_and_verify(expected_remaining, use_both=True)
     assert net.eval('worker_queue/size') == 0
 
-    net.shutdown()
+    net.reset_graph()
 
 
 def test_dequeue_inconsistent_batch_dimension(net: nn.model_utils.NNModel, data, filenames):

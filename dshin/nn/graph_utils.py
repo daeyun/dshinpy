@@ -9,6 +9,7 @@ from os import path
 import collections
 import numpy as np
 import textwrap
+from tensorflow.python.framework import meta_graph
 
 from IPython import display
 from google.protobuf import text_format
@@ -381,3 +382,65 @@ def write_new_checkpoint_state(dirname, checkpoint_path, is_verbose=True):
         f.write(text)
 
     return out_filename
+
+
+@contextlib.contextmanager
+def extract_meta_graph_def(clear_devices=True):
+    graph = tf.get_default_graph()
+    gdef_before = graph.as_graph_def(add_shapes=True)
+    existing_names = set([node.name for node in gdef_before.node])
+    existing_collections = {key: graph.get_collection(key) for key in graph.get_all_collection_keys()}
+
+    out_meta_graph_def = meta_graph.create_meta_graph_def()
+    tf.import_graph_def()
+    yield out_meta_graph_def
+
+    out_gdef = tf.GraphDef()
+    gdef_after = graph.as_graph_def(add_shapes=True)
+    for node in gdef_after.node:
+        if node.name in existing_names:
+            continue
+        new_node = out_gdef.node.add()
+        new_node.CopyFrom(node)
+        if clear_devices:
+            new_node.device = ''
+
+    new_collections = {key: graph.get_collection(key) for key in graph.get_all_collection_keys()}
+    collection_graph = tf.Graph()
+
+    for key, collection_list in new_collections.items():
+        if key in existing_collections:
+            existing_item_hashes = set([hash(existing_collection_item) for existing_collection_item in existing_collections[key]])
+            for item in collection_list:
+                if item not in existing_item_hashes:
+                    collection_graph.add_to_collection(key, item)
+        else:
+            for item in collection_list:
+                collection_graph.add_to_collection(key, item)
+
+    meta_graph_def = meta_graph.create_meta_graph_def(graph_def=out_gdef, collection_list=[])
+
+    out_meta_graph_def.CopyFrom(meta_graph_def)
+
+    with collection_graph.as_default():
+        clist = collection_graph.get_all_collection_keys()
+        for ctype in clist:
+            meta_graph.add_collection_def(out_meta_graph_def, ctype)
+
+
+def write_meta_graph_def(filename, meta_graph_def, is_text=False):
+    dirname = path.dirname(filename)
+    if not path.isdir(dirname):
+        log.info('mkdir -p {}'.format(dirname))
+        os.makedirs(dirname)
+
+    if is_text:
+        serialized = protobuf.text_format.MessageToString(meta_graph_def)
+        with open(filename, 'w') as f:
+            f.write(serialized)
+    else:
+        serialized = meta_graph_def.SerializeToString()
+        with open(filename, 'wb') as f:
+            f.write(serialized)
+
+    return serialized

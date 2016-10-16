@@ -66,33 +66,108 @@ class MV(nn.NNModel):
         return cross_entropy
 
 
-def feeder(net, data_source, enqueue_batch_size=50, queue_name='train'):
-    assert isinstance(net, nn.NNModel)
-    log.info('Feeder %s started', queue_name)
-    num_examples = data_source.num_examples
-    num_examples_enqueued = 0
+class DataFeeder(nn.distributed.TFProcess):
+    def _main(self, server: tf.train.Server, net: nn.NNModel):
+        queue_name = 'train'
+        assert isinstance(net, nn.NNModel)
+        log.info('Feeder %s started', queue_name)
+
+        enqueue_batch_size = 100
+
+        net.build(
+            server,
+            source_queue_names=[queue_name],
+            source_queue_sizes=[1000],
+            local_queue_size=300,
+            seed=42,
+            sync_replicas=True,
+            save_model_secs=600,
+            # parallel_read_size=20,
+        )
+
+        while True:
+            mnist = input_data.read_data_sets('/tmp/MNIST_data', one_hot=True)
+            data_source = mnist.train
+            num_examples = data_source.num_examples
+            num_examples_enqueued = 0
+            while num_examples_enqueued < num_examples:
+            # while num_examples_enqueued < 5000:
+                batch_size = min(num_examples - num_examples_enqueued, enqueue_batch_size)
+                x, y = data_source.next_batch(batch_size)
+                net.enqueue(queue_name, {
+                    'input': x,
+                    'target': y,
+                })
+                num_examples_enqueued += batch_size
+
+            net.close_source_queue(queue_name)
+
+        server.join()
+
+
+class Trainer(nn.distributed.TFProcess):
+    def _main(self, server: tf.train.Server, net: nn.NNModel):
+        queue_name = 'train'
+
+        net.warn_io_bottleneck = False
+        net.build(
+            server,
+            source_queue_names=[queue_name],
+            source_queue_sizes=[1000],
+            local_queue_size=300,
+            seed=42,
+            sync_replicas=True,
+            save_model_secs=600,
+            # parallel_read_size=20,
+        )
+        for i in range(10000):
+            losses = net.train(source='train', batch_size=self._batch_size)
+            net.eval_scalars('train', 'loss', batch_size=1)
+
+        server.join()
+
+
+def main(_):
+    cluster = nn.distributed.get_local_cluster_spec({
+        'ps': 2,
+        'worker': 6,
+        'data': 1,
+    })
+
+    # session_config = nn.utils.default_sess_config(log_device_placement=False)
+    session_config = None
+
+    log_dir = '/tmp/mnist_test_5'
+
     while True:
-        while num_examples_enqueued < num_examples:
-            batch_size = min(num_examples - num_examples_enqueued, enqueue_batch_size)
-            x, y = data_source.next_batch(batch_size)
-            net.enqueue(queue_name, {
-                'input': x,
-                'target': y,
-            })
-            num_examples_enqueued += batch_size
-        net.close_source_queue(queue_name)
-        break
-    log.info('Feeder %s is quitting', queue_name)
+        processes = []
+        processes.append(nn.distributed.ParameterServer(cluster, task_id=0, gpu_ids=()))
+        processes.append(nn.distributed.ParameterServer(cluster, task_id=1, gpu_ids=()))
+        processes.append(DataFeeder(cluster, job_name='data', task_id=0, nnmodel_class=MV,
+                                    experiment_name='mnist_train', logdir=log_dir, gpu_ids=()))
+
+        gpu_ids = [0, 1] + [None] * 4
+
+        for i, gid in enumerate(gpu_ids):
+            gpu_ids = [] if gid is None else [gid]
+            processes.append(Trainer(cluster, job_name='worker', task_id=i, nnmodel_class=MV,
+                                     experiment_name='mnist_train', logdir=log_dir,
+                                     session_config=session_config, gpu_ids=gpu_ids, batch_size=50))
+
+        for p in processes:
+            p.start()
+
+        # for p in processes:
+        #     if not isinstance(p, nn.distributed.ParameterServer):
+        #         p.join()
+        #
+        # for p in processes:
+        #     if isinstance(p, nn.distributed.ParameterServer):
+        #         p.terminate()
+
+        time.sleep(10000)
+        print('done!!')
 
 
 if __name__ == '__main__':
-    mnist = input_data.read_data_sets('/tmp/MNIST_data', one_hot=True)
-
-    net = MV()
-    net.build()
-
-    threading.Thread(target=feeder, args=(net, mnist.train, 20, 'train'), daemon=True).start()
-
-    net.warn_io_bottleneck = False
-
-    losses = net.train(source='train', batch_size=10)
+    tf.app.run(main)

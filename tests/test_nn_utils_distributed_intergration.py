@@ -306,7 +306,7 @@ class Worker(multiprocessing.Process):
         self.barrier('eval')
 
         self.barrier('before_shutdown')
-        net.shutdown()
+        net.reset_graph()
         self.barrier('after_shutdown')
 
 
