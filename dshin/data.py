@@ -130,7 +130,7 @@ class QueryPaginator(object):
 
 
 class DataSource(object):
-    def __init__(self, query_dict):
+    def __init__(self, query_dict, is_seamless=True):
         """
         Manages multiple `QueryPaginator` instances and supports continuous batching.
 
@@ -140,6 +140,7 @@ class DataSource(object):
         """
         self.query = query_dict
         self._paginator = self._assign_paginators_recursive(self.query)
+        self._is_seamless = is_seamless
 
     def _assign_paginators_recursive(self, query):
         if not isinstance(query, dict):
@@ -218,7 +219,7 @@ class DataSource(object):
 
     def next(self, key, batch_size=1):
         start_time = time.time()
-        out = self._next(key=key, batch_size=batch_size)
+        out = self._next(key=key, batch_size=batch_size, is_seamless=self._is_seamless)
 
         elapsed = time.time() - start_time
         if elapsed > 0.1 and self.current_row_count(key) > 1:

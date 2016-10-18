@@ -63,20 +63,45 @@ class MV(nn.NNModel):
         y = tf.matmul(x, W) + b
         cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(y, y_), name='loss')
 
+        correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32), name='accuracy')
+
+        with tf.name_scope('summary'):
+            self.add_scalar_summary('loss', cross_entropy, name='loss')
+            self.add_scalar_summary('accuracy', accuracy, name='accuracy')
+
         return cross_entropy
 
 
 class DataFeeder(nn.distributed.TFProcess):
-    def _main(self, server: tf.train.Server, net: nn.NNModel):
-        queue_name = 'train'
-        assert isinstance(net, nn.NNModel)
-        log.info('Feeder %s started', queue_name)
+    def _enqueue_all(self, net, queue_name, data_source, enqueue_batch_size):
 
-        enqueue_batch_size = 100
+        num_examples = data_source.num_examples
+        num_examples_enqueued = 0
+        self.log('Feeding {} items to {}'.format(num_examples, queue_name))
+
+        while num_examples_enqueued < num_examples:
+            batch_size = min(num_examples - num_examples_enqueued, enqueue_batch_size)
+            x, y = data_source.next_batch(batch_size)
+            net.enqueue(queue_name, {
+                'input': x,
+                'target': y,
+            })
+            num_examples_enqueued += batch_size
+
+        index = net.current_session_index()
+        net.close_source_queue(queue_name)
+        self.log('Closed queue {} after enqueueing {} items.'.format(queue_name, num_examples_enqueued))
+        net.wait_for_session_index(index + 1)
+
+    def _main(self, server: tf.train.Server, net: nn.NNModel):
+        assert isinstance(net, nn.NNModel)
+
+        enqueue_batch_size = 51
 
         net.build(
             server,
-            source_queue_names=[queue_name],
+            source_queue_names=['train', 'eval', 'eval2', 'eval3'],
             source_queue_sizes=[1000],
             local_queue_size=300,
             seed=42,
@@ -87,32 +112,20 @@ class DataFeeder(nn.distributed.TFProcess):
 
         while True:
             mnist = input_data.read_data_sets('/tmp/MNIST_data', one_hot=True)
-            data_source = mnist.train
-            num_examples = data_source.num_examples
-            num_examples_enqueued = 0
-            while num_examples_enqueued < num_examples:
-            # while num_examples_enqueued < 5000:
-                batch_size = min(num_examples - num_examples_enqueued, enqueue_batch_size)
-                x, y = data_source.next_batch(batch_size)
-                net.enqueue(queue_name, {
-                    'input': x,
-                    'target': y,
-                })
-                num_examples_enqueued += batch_size
 
-            net.close_source_queue(queue_name)
+            self._enqueue_all(net, 'train', mnist.train, enqueue_batch_size)
+            self._enqueue_all(net, 'eval', mnist.test, enqueue_batch_size)
+            # self._enqueue_all(net, 'train', mnist.train, enqueue_batch_size)
 
         server.join()
 
 
 class Trainer(nn.distributed.TFProcess):
     def _main(self, server: tf.train.Server, net: nn.NNModel):
-        queue_name = 'train'
-
         net.warn_io_bottleneck = False
         net.build(
             server,
-            source_queue_names=[queue_name],
+            source_queue_names=['train', 'eval', 'eval2', 'eval3'],
             source_queue_sizes=[1000],
             local_queue_size=300,
             seed=42,
@@ -120,9 +133,9 @@ class Trainer(nn.distributed.TFProcess):
             save_model_secs=600,
             # parallel_read_size=20,
         )
-        for i in range(10000):
-            losses = net.train(source='train', batch_size=self._batch_size)
-            net.eval_scalars('train', 'loss', batch_size=1)
+        for i in range(1000):
+            losses = net.train(source='train', batch_size=50, summary_keys=['scalar'])
+            net.eval_scalars('eval', ['loss', 'accuracy'], batch_size=55, summary_keys=['scalar'])
 
         server.join()
 
@@ -137,7 +150,7 @@ def main(_):
     # session_config = nn.utils.default_sess_config(log_device_placement=False)
     session_config = None
 
-    log_dir = '/tmp/mnist_test_5'
+    log_dir = '/tmp/mnist_test_19'
 
     while True:
         processes = []
@@ -152,7 +165,7 @@ def main(_):
             gpu_ids = [] if gid is None else [gid]
             processes.append(Trainer(cluster, job_name='worker', task_id=i, nnmodel_class=MV,
                                      experiment_name='mnist_train', logdir=log_dir,
-                                     session_config=session_config, gpu_ids=gpu_ids, batch_size=50))
+                                     session_config=session_config, gpu_ids=gpu_ids, batch_size=55))
 
         for p in processes:
             p.start()
@@ -165,7 +178,7 @@ def main(_):
         #     if isinstance(p, nn.distributed.ParameterServer):
         #         p.terminate()
 
-        time.sleep(10000)
+        time.sleep(1000000)
         print('done!!')
 
 

@@ -96,7 +96,9 @@ GLOG_PREFIX_REGEX = (
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(GlogFormatter())
 logger.addHandler(stream_handler)
-setLevel(logging.INFO)
+setLevel(logging.DEBUG)
+
+stream_handler.setLevel(logging.INFO)
 
 
 def add_file_handler(filename):
@@ -106,6 +108,7 @@ def add_file_handler(filename):
         info('New log file {}'.format(filename))
     file_handler = logging.FileHandler(filename)
     file_handler.setFormatter(GlogFormatter())
+    file_handler.setLevel(logging.DEBUG)
     logger.addHandler(file_handler)
 
 # logging.debug(time.strftime("Local time zone: %Z (%z)", time.localtime()))

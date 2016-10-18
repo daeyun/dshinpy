@@ -706,15 +706,15 @@ def collection_identity(value, name='identity'):
 #     """
 #     Returns A `Tensor` with the same value as `tensor`.
 #     Raises OutOfRangeError after evaluating limit_vartimes.
-#     dtype of the counter is always int64.
+#     dtype of the atomic_counter is always int64.
 #
 #     See also: `tf.train.limit_epochs`
 #     """
 #     assert isinstance(count_var, tf.Variable)
 #     assert isinstance(limit_var, tf.Variable)
 #     with tf.name_scope(name, "LimitEvaluationCount") as scope:
-#         counter = run_n_times_and_raise(count_var, limit_var)
-#         with tf.control_dependencies([counter]):
+#         atomic_counter = run_n_times_and_raise(count_var, limit_var)
+#         with tf.control_dependencies([atomic_counter]):
 #             out_tensor = collection_identity(tensor, name=scope)
 #     return out_tensor
 
@@ -744,3 +744,73 @@ def select_one(funcs, index_tensor, name, names):
         return ret
 
     raise ValueError('Unexpected return value type')
+
+
+def semaphore(value, device, name='semaphore'):
+    # TODO(daeyun): not stable
+    with tf.device(device), tf.name_scope(name) as scope:
+        lock = tf.FIFOQueue(capacity=value, dtypes=tf.bool, shapes=(),
+                            shared_name='blocking_queue', name='blocking_queue')
+        lock.close(cancel_pending_enqueues=True, name='close')
+        return lambda: lock.enqueue(True, name='acquire'), lambda: lock.dequeue(name='release')
+
+
+def barrier(size, device, name='barrier'):
+    """
+    A reusable barrier for synchronizing distributed workers. This function implements atomic entry and release operations using two queues.
+    Takes around 2ms with 6 workers on a single machine.
+
+    Operations:
+
+    - {name}/barrier: First caller becomes the chief worker responsible for waiting, releasing,
+                      and resetting after this is called `size` times.
+                      Evaluates to a unique integer in [1, size] for each caller, in the order they entered.
+    - {name}/init_op: This needs to be called once in the beginning.
+    - {name}/close: An operation to close the underlying queues.
+    - {name}/remaining: Number of remaining workers.
+
+    :param size: Number of workers to synchronize.
+    :param device: Device to place the queues. This should be the same one in all replicas.
+    :param name: A name for the operations.
+    :return: `{name}/barrier:0`.
+    """
+    entry_tokens = np.arange(size, dtype=np.int32)
+    release_tokens = np.ones(shape=[size - 1], dtype=np.bool)
+
+    with tf.device(device), tf.name_scope(name) as scope:
+        entry_queue = tf.FIFOQueue(capacity=entry_tokens.size, dtypes=tf.int32, shapes=(),
+                                   shared_name='{}/entry_queue'.format(name), name='entry_queue')
+        release_queue = tf.FIFOQueue(capacity=release_tokens.size, dtypes=tf.bool, shapes=(),
+                                     shared_name='{}/release_queue'.format(name), name='release_queue')
+        entry_queue.size('remaining')
+
+        # Not needed in most use-cases.
+        with tf.control_dependencies([entry_queue.close(cancel_pending_enqueues=True, name='entry_queue/close')]):
+            with tf.control_dependencies([]):
+                tf.group(release_queue.close(cancel_pending_enqueues=True, name='release_queue/close'), name='close')
+
+        def build_chief_wait_op():
+            # Wait until all workers enter the barrier.
+            with tf.control_dependencies([entry_queue.enqueue_many(entry_tokens, name='chief_wait_full')]):
+                # Before unblocking `release_queue`, temporarily block `entry_queue` so that entries to the next barrier can only be accepted after `release_queue` is emptied.
+                with tf.control_dependencies([entry_queue.dequeue_many(entry_tokens.size, name='block_entry')]):
+                    # Unblock all num_replicas - 1 workers. At this point, they should all be waiting in the `wait_for_release` op.
+                    with tf.control_dependencies([release_queue.enqueue_many(release_tokens, name='release')]):
+                        # This `enqueue_many` cannot happen until `release_queue` is empty.
+                        with tf.control_dependencies([release_queue.enqueue_many(release_tokens, name='wait_released')]):
+                            # Clear `release_queue` for the next use.
+                            with tf.control_dependencies([release_queue.dequeue_many(release_tokens.size, name='reset_release')]):
+                                # Populate `entry_queue` with tokens.
+                                chief_wait_op = entry_queue.enqueue_many(entry_tokens, name='accept_new_entries')
+            return chief_wait_op
+
+        init_op = entry_queue.enqueue_many(entry_tokens, name='init')
+
+        entry_token = entry_queue.dequeue(name='enter')
+        with tf.control_dependencies([entry_token.op]):
+            wait = tf.cond(tf.equal(entry_token, 0), build_chief_wait_op,
+                           lambda: release_queue.dequeue(name='wait_for_release'), name='wait')
+            with tf.control_dependencies([wait]):
+                ret = tf.identity(entry_token, name=scope)
+
+        return ret

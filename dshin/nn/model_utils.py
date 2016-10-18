@@ -52,7 +52,7 @@ class QueueComponents(object):
 
 
 class CountingQueueRunner(object):
-    def __init__(self, queue, enqueue_op, parallel_enqueue_op, parallel_enqueue_size, close_op, name=None):
+    def __init__(self, queue, enqueue_op, parallel_enqueue_op, parallel_enqueue_size, close_op, net, source_name=None, name=None):
         self.queue = queue
         self._enqueue_op = enqueue_op
         self._parallel_enqueue_op = parallel_enqueue_op
@@ -62,9 +62,11 @@ class CountingQueueRunner(object):
         self._close_op = close_op
         self.should_stop = False
         self.name = name
+        self.source_name = source_name
 
         self._lock = threading.RLock()
         self._threads = []
+        self._net = net
 
     def _run(self, sess: tf.Session):
         while True:
@@ -85,9 +87,10 @@ class CountingQueueRunner(object):
                 else:
                     sess.run(self._enqueue_op)
             except tf.errors.OutOfRangeError as ex:
+                self._net.info('Closing {}.'.format(self.queue.name))
                 sess.run(self._close_op)
                 break
-        log.info('Queue runner for {} reached end of epoch.'.format(self.queue.name))
+        self._net.info('Queue runner for {} reached end of epoch (source {}).'.format(self.queue.name, self.source_name))
         # If one thread stops, others should too.
         self.request_stop()
 
@@ -281,6 +284,8 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             self.logdir = tempfile.mkdtemp(prefix=self._temp_logdir_prefix)
 
+        log.add_file_handler(path.join(self.logdir, 'out.log'))
+
         log.info('logdir is %s', self.logdir)
 
         self.is_debug_mode = False
@@ -291,6 +296,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.run_metadata = None
         self._session_reset_count = 0
         self._container_names = set()
+        self._container_names_to_reset = set()
         self._weighted_mean_dequeue = None
 
         # These values are set in `self.build()`.
@@ -315,10 +321,30 @@ class NNModel(metaclass=abc.ABCMeta):
         self._local_queue_size_tensor = None
         self._source_queue_size_tensors = {}
         self._tf_record_readers = []  # Only used internally to reuse record readers.
-        self._needs_rebuild = False
+        self._needs_rebuild_for_training = False
+
+        self._lock = threading.RLock()
+        self._train_step_start_time = None
+
+        self._thread = threading.Thread(target=self._monitoring_thread_routine, daemon=True)
+        self._thread.start()
+
+    def _monitoring_thread_routine(self):
+        while True:
+            time.sleep(0.2)
+            if self._train_step_start_time is not None:
+                elapsed = time.time() - self._train_step_start_time
+                if elapsed > 20:
+                    self._train_step_start_time = None
+                    with self._lock:
+                        self.info('Interrupting training step.')
+                        if self.is_chief:
+                            self.save()
+                        config = self.server.server_def.default_session_config
+                        tf.Session.reset(self.server.target, containers=['default-vars'], config=config)
+                        self.session = self.prepare_or_wait_for_session()
 
     def _optimizer(self, learning_rate):
-        # TODO(daeyun): consider setting `use_locking`.
         return tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-6)
 
     def default_placeholders(self) -> typing.Sequence[tf.Tensor]:
@@ -326,8 +352,9 @@ class NNModel(metaclass=abc.ABCMeta):
             tf.placeholder(tf.float32, shape=(), name='learning_rate'),  # Used for setting learning rates.
             tf.placeholder_with_default(tf.constant(False, name='kFalse'), shape=(), name='is_training'),
             tf.placeholder(tf.int32, shape=(), name='batch_size'),
-            tf.placeholder(tf.float32, shape=(), name='weighted_mean_value'),
-            tf.placeholder(tf.float32, shape=(), name='weighted_mean_weight'),
+
+            # Used internally. Not exposed to the user.
+            tf.placeholder(tf.float32, shape=(None,), name='float_sequence_'),
         ]
 
     def default_variables(self):
@@ -359,7 +386,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         if name not in self._summary_writers:
             summary_writer_path = path.join(self.logdir, 'summary', name)
-            log.info('Creating summary writer %s at %s', name, summary_writer_path)
+            self.info('Creating summary writer {} at {}'.format(name, summary_writer_path))
             self._summary_writers[name] = tf.train.SummaryWriter(summary_writer_path, graph=graph)
         return self._summary_writers[name]
 
@@ -412,7 +439,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                                 placeholder_specs=placeholder_specs,
                                                 all_source_queue_components=all_queue_components,
                                                 local_device=self.local_device_name())
-        log.info('Built local queue: %s', tensor_dict)
+        self.info('Built local queue: {}'.format(tensor_dict))
 
         with tf.name_scope('placeholder/'):
             for i, (field_name, tensor) in enumerate(tensor_dict.items()):
@@ -464,8 +491,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def rebuild(self):
         assert not self.needs_initialization
-        self.log('Rebuilding model {}.'.format(self.__class__.__name__))
-        self.reset_graph()
+        self.info('Rebuilding model {}.'.format(self.__class__.__name__))
+        # Reset all queue containers.
+        self.reset_graph(containers=[name for name in list(self._container_names) if name.startswith(self._source_queue_prefix)])
         ret = self.build(self.server,
                          job_name=self.job_name,
                          source_queue_names=self.queue_names,
@@ -476,17 +504,25 @@ class NNModel(metaclass=abc.ABCMeta):
                          sync_replicas=self.sync_replicas,
                          save_model_secs=self.save_model_secs,
                          from_model_checkpoint=self.imported_model_checkpoint_name)
-        self._needs_rebuild = False
+        self._needs_rebuild_for_training = False
         return ret
 
-    def log(self, msg, *args):
+    def info(self, msg, *args, chief_only=True):
+        if chief_only and not self.is_chief:
+            return self.debug(msg, *args)
         log.info('[%s %d] ' + msg, self.job_name, self.task_id, *args)
+
+    def debug(self, msg, *args):
+        log.debug('[%s %d] ' + msg, self.job_name, self.task_id, *args)
+
+    def warn(self, msg, *args):
+        log.warn('[%s %d] ' + msg, self.job_name, self.task_id, *args)
 
     def build(self,
               server=None,
               job_name=None,
-              source_queue_names=('train',),
-              source_queue_sizes=(1000,),
+              source_queue_names=('train', 'eval'),
+              source_queue_sizes=(1000, 300),
               local_queue_size=150,
               parallel_read_size=20,
               seed=None,
@@ -494,7 +530,7 @@ class NNModel(metaclass=abc.ABCMeta):
               save_model_secs=600,
               from_model_checkpoint=None):
         if server is None:
-            log.info('`tf.train.Server` was not provided. Creating a local server.')
+            self.info('`tf.train.Server` was not provided. Creating a local server.')
             server = tf.train.Server.create_local_server()
 
         assert isinstance(server, tf.train.Server)
@@ -504,7 +540,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.queue_sizes = list(ensure_list_or_tuple(source_queue_sizes))
 
         if len(self.queue_names) > len(self.queue_sizes):
-            log.info('Using default queue size %s for %s', self._default_source_queue_size, ', '.join(self.queue_names[len(self.queue_sizes):]))
+            self.info('Using default queue size %s for %s', self._default_source_queue_size, ', '.join(self.queue_names[len(self.queue_sizes):]))
             self.queue_sizes.extend([self._default_source_queue_size] * (len(self.queue_names) - len(self.queue_sizes)))
         elif len(self.queue_names) < len(self.queue_sizes):
             del self.queue_sizes[len(self.queue_names):]
@@ -524,8 +560,6 @@ class NNModel(metaclass=abc.ABCMeta):
         self.job_name = job_name
 
         if self.logdir:
-            log.add_file_handler(path.join(self.logdir, 'out.log'))
-
             if from_model_checkpoint is not None:
                 graph_utils.write_new_checkpoint_state(self.logdir, from_model_checkpoint)
 
@@ -549,7 +583,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.num_replicas = self.cluster_spec.num_tasks(trainer_job_name)
 
         worker_device_name = self.local_device_name()
-        log.info('[%s %d] Device name is %s', self.job_name, self.task_id, worker_device_name)
+        self.info('Device name is {}'.format(worker_device_name))
         device_setter = tf.train.replica_device_setter(worker_device=worker_device_name,
                                                        cluster=server.server_def.cluster)
 
@@ -598,26 +632,15 @@ class NNModel(metaclass=abc.ABCMeta):
                         local_step_init_op = optim.local_step_init_op
                         ready_for_local_init_op = optim.ready_for_local_init_op
 
-            with tf.device(self.variable('global_step').device):
-                with self.container('build-vars'):
-                    replica_ready_count = tf.Variable(0, trainable=False, dtype=tf.int32, name='replica_ready_count')
-                    increment_replica_ready_count = tf.assign_add(replica_ready_count, 1, use_locking=True, name='increment_replica_ready_count')
-                reset_count = tf.Variable(0, trainable=False, dtype=tf.int32, name='session_reset_count')
-                tf.assign_add(reset_count, 1, use_locking=True, name='increment_session_reset_count')
-
             # Exclude any queue-specific variables.
             vars_to_save = []
             for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
                 for name in self.queue_names:
                     if (var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)) or
-                            ('replica_ready_count' in var.name) or
-                            ('session_reset_count' in var.name) or
                             ('_local_step' in var.name)):
                         break
                 else:
                     vars_to_save.append(var)
-
-            vars_to_init = {tf.is_variable_initialized(v): v for v in tf.all_variables()}
 
             self.saver = tf.train.Saver(
                 name=self._saver_prefix,
@@ -629,27 +652,38 @@ class NNModel(metaclass=abc.ABCMeta):
 
             # Variables created after this point will not be saved.
 
+            with tf.device(self.variable('global_step').device), tf.name_scope('nn_sync'):
+                with self.container('aggregation'), tf.name_scope('weighted_mean'):
+                    weighted_mean_queue = tf.FIFOQueue(capacity=-1, dtypes=[tf.float32, tf.float32], shapes=[[], []], names=['value', 'weight'],
+                                                       shared_name='weighted_mean_queue', name='queue')
+                    weighted_mean_queue.enqueue({
+                        'value': self.placeholder('float_sequence_')[0],
+                        'weight': self.placeholder('float_sequence_')[1],
+                    }, name='enqueue')
+                    # A dict with keys 'value' and 'weight'.
+                    self._weighted_mean_dequeue = weighted_mean_queue.dequeue_many(self.num_replicas, name='dequeue')
+
+                with self.container('barrier', reset_by_default=False):
+                    # Defines `nn_sync/barrier` and `nn_sync/barrier/init`.
+                    nn_ops.barrier(size=self.num_replicas, device=self.variable('global_step').device, name='barrier')
+
+                reset_count = tf.Variable(0, trainable=False, dtype=tf.int32, name='session_reset_count')
+                tf.assign_add(reset_count, 1, use_locking=True, name='increment_session_reset_count')
+
+                with self.container('atomic_counter'):
+                    counter_queue = tf.FIFOQueue(-1, dtypes=tf.int32, shared_name='atomic_counter', name='atomic_counter')
+                    reset_counter_op = counter_queue.enqueue_many(vals=np.arange(self.num_replicas), name='reset_counter')
+                    counter_queue.dequeue('count')
+
+            vars_to_init = {tf.is_variable_initialized(v): v for v in tf.all_variables()}
             init_op = tf.initialize_all_variables()
             local_init_op = tf.initialize_local_variables()
-
-            with tf.device(self.variable('global_step').device), self.container('aggregation'):
-                weighted_mean_queue = tf.FIFOQueue(capacity=-1, dtypes=[tf.float32, tf.float32], shapes=[[], []], names=['value', 'weight'],
-                                                   shared_name='weighted_mean_queue', name='weighted_mean_queue')
-                weighted_mean_queue.enqueue({
-                    'value': self.placeholder('weighted_mean_value'),
-                    'weight': self.placeholder('weighted_mean_weight')
-                }, name='weighted_mean_enqueue_op')
-                self._weighted_mean_dequeue = weighted_mean_queue.dequeue_many(self.num_replicas, name='weighted_mean_dequeue')
-                done_queue = tf.FIFOQueue(capacity=-1, dtypes=[tf.bool], shapes=[[]],
-                                          shared_name='aggregation_done_queue', name='aggregation_done_queue')
-                done_queue.enqueue_many(np.ones(shape=[self.num_replicas], dtype=np.bool), name='task_signal_done')
-                done_queue.dequeue(name='task_wait_until_done')
 
             if self.is_chief:
                 self._init_summaries()  # Sets self._summary_tensors
 
             if self.is_chief and path.isfile(self.checkpoint_filename()):
-                self.log('{} exists. Model will be restored.'.format(self.checkpoint_filename()))
+                self.info('{} exists. Model will be restored.'.format(self.checkpoint_filename()))
 
             global_step = self.variable('global_step')
 
@@ -667,14 +701,14 @@ class NNModel(metaclass=abc.ABCMeta):
                                                   save_model_secs=save_model_secs,
                                                   ready_for_local_init_op=ready_for_local_init_op,
                                                   checkpoint_basename=self._checkpoint_basename,
-                                                  stop_grace_secs=20,
+                                                  stop_grace_secs=5,
                                                   )
 
-        self.log('Waiting for session.')
+        self.info('Waiting for session.')
         sess = self.prepare_or_wait_for_session(start_standard_services=self.is_chief)
         assert isinstance(sess, tf.Session)
         self.session = sess
-        self.log('Session is ready.')
+        self.info('Session is ready.')
 
         # Data processes should not be able to consume from the source queue.
         if self.job_name == 'data':
@@ -685,21 +719,24 @@ class NNModel(metaclass=abc.ABCMeta):
             is_initialized = self.session.run([value for value in vars_to_init.keys()])
             uninitialized_vars = [var for is_init, var in zip(is_initialized, vars_to_init.values()) if not is_init]
             self.session.run([v.initializer for v in uninitialized_vars])
+            if self.current_session_index() == 0:
+                self.session.run(self.operation('nn_sync/barrier/init'))
+            self.session.run(reset_counter_op)
 
-            self.log('Variables not restored from checkpoint were initialized from scratch: %s',
-                     [v.name for v in uninitialized_vars])
+            self.info('Variables not restored from checkpoint were initialized from scratch: %s',
+                      [v.name for v in uninitialized_vars])
 
             if init_tokens_op is not None:
                 sess.run(init_tokens_op)
 
             self.supervisor.start_queue_runners(sess, queue_runners)
 
-            self.log('Initialized chief.')
+            self.info('Initialized chief.')
 
         sess.run(local_init_op)
-        self.log('Initialized local variables.')
+        self.info('Initialized local variables.')
 
-        if self.is_chief and self.logdir:
+        if self.is_chief and self.logdir and self._session_reset_count == 0:
             graph_utils.save_graph_text_summary(self.graph, dirname=self.logdir, verbose=True)
 
         self.supervisor.coord._clean_stop_exception_types = tuple([tf.errors.CancelledError])
@@ -710,11 +747,10 @@ class NNModel(metaclass=abc.ABCMeta):
                 try:
                     is_initialized = self.session.run([value for value in vars_to_init.keys()])
                     assert all(is_initialized)
-                    self.session.run(increment_replica_ready_count)
                 except (tf.errors.FailedPreconditionError, AssertionError) as ex:
-                    if i % 10 == 0:
-                        self.log('Waiting for all variables to be initialized.')
-                    time.sleep(0.5)
+                    if i % 20 == 0:
+                        self.info('Waiting for all variables to be initialized.')
+                    time.sleep(0.25)
                     i += 1
                 except Exception as ex:
                     log.error('Unexpected exception: {}.'.format(ex))
@@ -722,67 +758,97 @@ class NNModel(metaclass=abc.ABCMeta):
                 else:
                     break
 
-            current_ready_count = self.session.run(replica_ready_count)
-            self.log('All variables are initialized. {} replicas out of {} ready.'.format(current_ready_count, self.num_replicas))
-
-            logged_count = current_ready_count
-            while True:
-                try:
-                    current_ready_count = self.session.run(replica_ready_count)
-                    assert current_ready_count >= self.num_replicas
-                except AssertionError as ex:
-                    if logged_count is not current_ready_count:
-                        self.log('Waiting for replicas. {} out of {} ready.'.format(current_ready_count, self.num_replicas))
-                        logged_count = current_ready_count
-                    time.sleep(0.5)
-                except Exception as ex:
-                    log.error('Unexpected exception: {}.'.format(ex))
-                    raise ex
-                else:
-                    break
-            self.log('All replicas are ready.')
+            self.barrier('all_replicas_ready', verbose=True)
+            if self.is_chief:
+                self.info('All replicas are ready.')
+                self.info('Containers: {}'.format(', '.join(list(self._container_names))))
 
         self.needs_initialization = False
 
         if self.job_name in ('worker', 'local'):
-            self._session_reset_count = self.current_session_reset_count()
-            log.info('global_step: %d', self.eval('global_step'))
-            log.info('learning_rate: %f', self.eval('learning_rate'))
+            self._session_reset_count = self.current_session_index()
+            self.info('global_step: {:d}'.format(self.eval('global_step')))
+            self.info('learning_rate: {:.5f}'.format(self.eval('learning_rate')))
+
+    def barrier(self, name, verbose=False, timeout=None):
+        """
+        Implemented using a queue. Forces all workers to wait until they all reach the same point.
+        :param name: Currently only used for logging.
+        :param verbose: If True, logs entry and release, with elapsed time.
+        """
+        start_time = time.time()
+        (self.info if verbose else self.debug)('Waiting for barrier {}.'.format(name))
+        if timeout is not None:
+            options = tf.RunOptions(timeout_in_ms=timeout)
+        else:
+            options = None
+        with self._lock:
+            entry_id = self.session.run(self.tensor('nn_sync/barrier:0'), options=options)
+        (self.info if verbose else self.debug)('Passed barrier {0}. Entry id: {1}. Time elapsed: {2:.3g} seconds'.format(name, entry_id, time.time() - start_time))
+        return entry_id
+
+    def atomic_counter(self):
+        num = self.session.run(self.tensor('nn_sync/count:0'))
+        return num
+
+    def reset_atomic_counter(self):
+        num = self.session.run(self.operation('nn_sync/reset_counter'))
+        return num
 
     def aggregate_mean(self, value, weight):
         assert not self.needs_initialization
-        if value is not None:
-            self.eval('weighted_mean_enqueue_op', feed_dict={
-                'weighted_mean_value': value,
-                'weighted_mean_weight': weight,
+        if value is None:
+            self.eval('nn_sync/weighted_mean/enqueue', feed_dict={
+                'float_sequence_': [0.0, 0.0],
+            })
+        else:
+            self.eval('nn_sync/weighted_mean/enqueue', feed_dict={
+                'float_sequence_': [value, weight],
             })
 
         ret = None
+        weight_sum = None
         if self.is_chief:
             values, weights = self.eval([self._weighted_mean_dequeue['value'], self._weighted_mean_dequeue['weight']], return_dict=False)
-            self.eval('task_signal_done')
-            self.log('Received values from all replicas.')
-            ret = float((values * weights).sum() / weights.sum())
+            weight_sum = weights.sum()
+            if weight_sum > 0:
+                ret = (float((values * weights).sum() / weight_sum))
+            else:
+                self.info('Unable to collect values. {}, {}'.format(values, weights))
 
-        self.eval('task_wait_until_done')
-        self.log('End of aggregate_mean.')
-        return ret
+        self.barrier('aggregate_mean')
+        return ret, weight_sum
 
-    def current_session_reset_count(self):
-        assert not self.needs_initialization
-        return self.session.run(self.tensor('session_reset_count'))
+    def current_session_index(self):
+        with self._lock:
+            try:
+                count = self.session.run(self.graph.get_tensor_by_name('nn_sync/session_reset_count:0'))
+            except tf.errors.FailedPreconditionError:
+                count = 0
+            return count
+
+    def wait_for_session_index(self, index):
+        with self._lock:
+            self.info('Waiting for session {}.'.format(index))
+            while True:
+                if index <= self.current_session_index():
+                    break
+                time.sleep(0.2)
+            self.session = self.prepare_or_wait_for_session()
+            self.info('New session {}.'.format(index))
 
     def prepare_or_wait_for_session(self, start_standard_services=False):
-        config = self.server.server_def.default_session_config
-        sess = self.supervisor.prepare_or_wait_for_session(master=self.server.target, config=config,
-                                                           start_standard_services=start_standard_services)
+        with self._lock:
+            config = self.server.server_def.default_session_config
+            sess = self.supervisor.prepare_or_wait_for_session(master=self.server.target, config=config,
+                                                               start_standard_services=start_standard_services)
         return sess
 
     def checkpoint_filename(self):
         # This should match self.supervisor's save_path.
         return path.join(self.logdir, self._checkpoint_basename)
 
-    def container(self, container_name):
+    def container(self, container_name, reset_by_default=True):
         renamed_from = None
         if '_' in container_name:
             renamed_from = container_name
@@ -790,8 +856,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if container_name not in self._container_names:
             if renamed_from is not None:
-                self.log('Container %s was renamed to %s.', renamed_from, container_name)
+                self.info('Container %s was renamed to %s.', renamed_from, container_name)
             self._container_names.add(container_name)
+            if reset_by_default:
+                self._container_names_to_reset.add(container_name)
 
         return self.graph.container(container_name)
 
@@ -850,7 +918,7 @@ class NNModel(metaclass=abc.ABCMeta):
             placeholders.append(placeholder)
 
         with tf.device(enqueue_device):
-            with self.container(queue_name):
+            with self.container(queue_name, reset_by_default=False):
                 queue = tf.FIFOQueue(queue_size, dtypes=dtypes, shapes=shapes,
                                      names=names, shared_name=queue_name, name=queue_name)
             enqueue_tensors = {name: placeholder for name, placeholder in zip(names, placeholders)}
@@ -999,11 +1067,14 @@ class NNModel(metaclass=abc.ABCMeta):
         qr = self._consumer_queue_runners[queue_name]
         # assert isinstance(qr, CountingQueueRunner)
         assert len(qr.running_threads()) == 0
+        qr.source_name = queue_name
 
         self._current_source_queue_name = queue_name
         current_worker_queue_size = self.current_queue_size()
         if current_worker_queue_size != 0:
             raise RuntimeError('Worker queue size is not 0: {}'.format(current_worker_queue_size))
+
+        self.info('Requesting data from {}. (current size {})'.format(queue_name, self.source_queue_size(queue_name)))
 
         self._consumer_threads[queue_name] = qr.start_threads(self.session, max_size, num_threads, net=self)
         # TODO(daeyun): check dequeue from the local queues still work after global dequeue halts.
@@ -1045,7 +1116,7 @@ class NNModel(metaclass=abc.ABCMeta):
             with self.container(name.replace('_', '-')):
                 # Shared name is needed for re-opening queues (TODO).
                 queue = tf.FIFOQueue(capacity=queue_size, dtypes=types, shapes=shapes, names=names,
-                                     name='queue', shared_name='queue_{}_{}'.format(self.job_name, self.task_id))
+                                     name='queue', shared_name='{}_{}_{}'.format(name, self.job_name, self.task_id))
 
             # `worker_queue/size:0`.
             self._local_queue_size_tensor = queue.size('size')
@@ -1066,7 +1137,7 @@ class NNModel(metaclass=abc.ABCMeta):
                                                             local_device, parallel_read_size=1)
                     qr = CountingQueueRunner(queue, enqueue_op=enqueue_op, parallel_enqueue_op=parallel_enqueue_op,
                                              parallel_enqueue_size=self.parallel_read_size,
-                                             name=basename, close_op=close_op)
+                                             name=basename, close_op=close_op, net=self)
                     self._consumer_queue_runners[basename] = qr
 
             # Sanity check.
@@ -1081,55 +1152,48 @@ class NNModel(metaclass=abc.ABCMeta):
 
             return batch_tensors
 
-    def reset_graph(self):
-        if self.is_chief:
-            current_count = self.reset_session(increment=True)
-        else:
-            i = 0
-            while True:
-                current_count = self.current_session_reset_count()
-                if self._session_reset_count < current_count:
-                    break
-                if i % 5 == 0:
-                    self.session.close()
-                    self.session = self.prepare_or_wait_for_session()
-                    self.log('Waiting for session reset. {} >= {}'.format(self._session_reset_count, current_count))
-                if i == (30 + 10 * self.task_id):
-                    # TODO(daeyun): Find a better way to handle this case.
-                    self.reset_session(increment=False)
-                    self.log('Chief worker was not available, likely waiting in a blocking operation. tf.Session.reset() was called by another worker to interrupt.')
-                time.sleep(0.5)
-                i += 1
-
-        log.info('[%s %d] Stopping threads.', self.job_name, self.task_id)
-        for name, runner in self._consumer_queue_runners.items():
-            runner.request_stop()
-        self.supervisor.stop()
-
+    def reset_graph(self, containers=None):
         assert not self.needs_initialization
+
+        self.reset_session(containers=containers)
+
+        self.info('Stopping threads.')
+        for name, runner in self._consumer_queue_runners.items():
+            try:
+                runner.request_stop()
+            except:
+                pass
+        try:
+            self.supervisor.stop()
+        except (tf.errors.AbortedError, RuntimeError):
+            pass
 
         tf.reset_default_graph()
         self.graph = tf.get_default_graph()
 
         self.needs_initialization = True
 
-        self.log('Reset complete. Reset count: {}. is_chief: {}'.format(current_count, self.is_chief))
-
-    def reset_session(self, containers=None, increment=True):
-        default_containers = list(self._container_names)
-        if containers is not None:
-            containers = ensure_list_or_tuple(containers, str)
-            default_containers.extend(containers)
-        containers = default_containers
-        self.log('Resetting containers %s', ', '.join(containers))
-        config = self.server.server_def.default_session_config
-        tf.Session.reset(self.server.target, containers=containers, config=config)
-        self.session = self.prepare_or_wait_for_session()
-        if increment:
-            self.session.run(self.operation('increment_session_reset_count'))
-        count = self.current_session_reset_count()
-        self.log('Session reset count is {}'.format(count))
-        return count
+    def reset_session(self, containers=None, include_default_containers=True):
+        if self.is_chief:
+            with self._lock:
+                if include_default_containers:
+                    default_containers = list(self._container_names_to_reset)
+                else:
+                    default_containers = []
+                if containers is not None:
+                    containers = ensure_list_or_tuple(containers, str)
+                    default_containers.extend(containers)
+                containers = list(set(default_containers))
+                self.info('Resetting containers %s', ', '.join(containers))
+                config = self.server.server_def.default_session_config
+                tf.Session.reset(self.server.target, containers=containers, config=config)
+                self.session = self.prepare_or_wait_for_session()
+        self.barrier('reset_containers', verbose=True)
+        if self.is_chief:
+            self.session.run(self.operation('nn_sync/increment_session_reset_count'))
+        else:
+            self.session = self.prepare_or_wait_for_session()
+        self.barrier('restore_session')
 
     def operation(self, names, fail=True) -> tf.Operation:
         is_single = not isinstance(names, (list, tuple))
@@ -1301,7 +1365,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         Trains until the end of current epoch.
         """
-        if self._needs_rebuild:
+        if self._needs_rebuild_for_training:
             self.rebuild()
 
         if summary_steps is None and summary_keys is not None:
@@ -1323,10 +1387,13 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.set_default_batch_size(source, batch_size)
 
         assert self.has_data()
+        self.barrier('train/start'.format(source))
 
         while not is_out_of_range and self.has_data():
             if summary_keys is not None:
                 keys = [key for key in summary_keys if i % summary_steps[key] == 0]
+            if not self.is_chief:
+                keys = None
 
             if feed_dict is not None and 'batch_size' in feed_dict:
                 batch_size = feed_dict['batch_size']
@@ -1342,33 +1409,34 @@ class NNModel(metaclass=abc.ABCMeta):
                 # For now, the process has to be killed externally.
                 # TODO(daeyun): Last training step should be asynchronous.
                 if i == 0:
-                    self.log('Starting first training step.')
+                    self.debug('Starting first training step.')
+                else:
+                    with self._lock:
+                        self._train_step_start_time = time.time()
                 batch_loss, global_step = self.train_step(feed_dict=feed_dict,
                                                           summary_keys=keys,
                                                           check_placeholder_coverage=check_placeholder_coverage and i == 0,
                                                           run_options=run_options,
                                                           log_elapsed_time=log_elapsed_time)
                 if i == 0:
-                    self.log('First training step done.')
-            except (tf.errors.OutOfRangeError, tf.errors.NotFoundError, BlockingIOError) as ex:
-                # if i == 0:
-                #     raise ex
-                is_out_of_range = True
-                global_step = self.current_global_step()
-                # try:
-                #     self.session.run(self.operation('{}/sync_close_op'.format(self._optimizer_prefix)))
-                # except:
-                #     pass
+                    self.debug('Finished first training step.')
+            except tf.errors.OutOfRangeError as ex:
+                break
+            except (tf.errors.NotFoundError, BlockingIOError, tf.errors.AbortedError, tf.errors.CancelledError) as ex:
+                self.debug('train_step was interrupted {}'.format(ex))
+                break
             else:
                 i += 1
                 num_examples += batch_size
                 current_losses.append(batch_loss)
                 losses.append(batch_loss)
+            finally:
+                with self._lock:
+                    self._train_step_start_time = None
 
             elapsed_since_last_log = time.time() - log_start_time
 
-            # Always log last batch.
-            if (elapsed_since_last_log >= log_every_seconds or is_out_of_range) and len(current_losses) > 0:
+            if (elapsed_since_last_log >= log_every_seconds) and len(current_losses) > 0:
                 bps = (i - log_start_i) / elapsed_since_last_log
                 valids = np.isfinite(current_losses)
                 current_losses = np.array(current_losses)
@@ -1376,22 +1444,36 @@ class NNModel(metaclass=abc.ABCMeta):
                     mean_loss = current_losses[valids].mean()
                 else:
                     mean_loss = current_losses[0]
-                self.log('global_step: {:<9d} batches/s: {:<9.4g} loss: {:<9.6g}'.format(global_step, bps, mean_loss))
+                self.info('Training. global_step: {:<9d} batches/s: {:<9.4g} loss: {:<9.6g}'.format(global_step, bps, mean_loss), chief_only=False)
                 if (~valids).any():
-                    log.warn('%d invalid loss values detected.', (~valids).sum())
+                    self.warn('{} invalid loss values detected.'.format((~valids).sum()))
                 log_start_time = time.time()
                 log_start_i = i
                 current_losses = []
 
-        if len(losses) < 0:
-            log.warn('Training failed. Make sure data is available in the queue.')
+        if len(losses) <= 0:
+            self.warn('Training failed. Make sure data is available in the queue.')
         else:
-            self.log('End of training epoch. Examples: {}  Batches: {}  Loss: {:.6g}'.format(num_examples, i, np.mean(losses)))
+            self.info('End of training epoch. Examples: {}  Batches: {}  Loss: {:.6g}'.format(num_examples, i, np.mean(losses)))
+
+        self.barrier('train')
 
         if self.is_chief:
             self.save()
 
-        self._needs_rebuild = True
+        self.barrier('train/save')
+
+        self._needs_rebuild_for_training = True
+
+        if len(losses) > 0 and num_examples > 0:
+            overall_mean, total_num_examples = self.aggregate_mean(np.mean(losses), num_examples)
+            if self.is_chief:
+                self.info('Overall training loss was {:.6g} over {} examples.'.format(overall_mean, total_num_examples))
+                self.write_scalar_summary(tag='overall/loss', value=overall_mean, summary_writer_name='train', flush=True)
+        else:
+            self.aggregate_mean(None, None)
+
+        self.barrier('train/end')
         return losses
 
     def train_step(self,
@@ -1415,38 +1497,25 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.eval([loss, self.tensor('global_step')], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys,
                          check_placeholder_coverage=check_placeholder_coverage, run_options=run_options, log_elapsed_time=log_elapsed_time, return_dict=False)
 
-    def enqueue(self, name, feed_dict: dict, retry_if_closed=True):
+    def enqueue(self, name, feed_dict: dict):
         assert not self.needs_initialization, 'Variables are not initialized.'
-        while True:
-            try:
-                new_feed_dict = {}
-                for k, v in feed_dict.items():
-                    if isinstance(k, str):
-                        if not k.startswith(self._source_queue_prefix):
-                            k = 'placeholder/{}/{}/{}'.format(self._source_queue_prefix, name, k)
-                        new_feed_dict[self.placeholder(k)] = v
-                    elif isinstance(k, tf.Tensor):
-                        new_feed_dict[k] = v
-                    else:
-                        raise ValueError('Unexpected key in feed_dict: {}'.format(k))
-
-                for k, v in new_feed_dict.items():
-                    assert isinstance(k, tf.Tensor)
-                    assert k.name.startswith('placeholder/{}/{}'.format(self._source_queue_prefix, name))
-
-                enqueue_op = self.operation('{}/{}/enqueue'.format(self._source_queue_prefix, name))
-                self.session.run(enqueue_op, feed_dict=new_feed_dict)
-            except (tf.errors.CancelledError, tf.errors.NotFoundError) as ex:
-                if retry_if_closed:
-                    time.sleep(1)
-                    if not self.is_chief:
-                        self.session = self.prepare_or_wait_for_session()
-                else:
-                    raise ex
-            except Exception as ex:
-                raise ex
+        new_feed_dict = {}
+        for k, v in feed_dict.items():
+            if isinstance(k, str):
+                if not k.startswith(self._source_queue_prefix):
+                    k = 'placeholder/{}/{}/{}'.format(self._source_queue_prefix, name, k)
+                new_feed_dict[self.placeholder(k)] = v
+            elif isinstance(k, tf.Tensor):
+                new_feed_dict[k] = v
             else:
-                break
+                raise ValueError('Unexpected key in feed_dict: {}'.format(k))
+
+        for k, v in new_feed_dict.items():
+            assert isinstance(k, tf.Tensor)
+            assert k.name.startswith('placeholder/{}/{}'.format(self._source_queue_prefix, name))
+
+        enqueue_op = self.operation('{}/{}/enqueue'.format(self._source_queue_prefix, name))
+        self.session.run(enqueue_op, feed_dict=new_feed_dict)
 
     def close_source_queue(self, name):
         close_op = self.operation('{}/{}/close'.format(self._source_queue_prefix, name))
@@ -1480,7 +1549,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
     def set_default_batch_size(self, queue_name, size):
         assert queue_name in self.queue_names
-        self.log('Setting the default batch size for %s to %d', queue_name, size)
+        self.info('Setting the default batch size for %s to %d', queue_name, size)
         self.default_batch_sizes[queue_name] = size
 
     def default_batch_size(self, queue_name):
@@ -1488,48 +1557,75 @@ class NNModel(metaclass=abc.ABCMeta):
             return self.default_batch_sizes[queue_name]
         return None
 
-    def eval_scalars(self, source, tensor_names, batch_size=1):
-        if self._needs_rebuild:
-            self.rebuild()
+    def eval_scalars(self, source, tensor_names, batch_size=1, log_every_seconds=5, summary_keys=None):
+        if self._needs_rebuild_for_training:
+            self.reset_session(containers=['{}/{}'.format(self._source_queue_prefix, source)])
 
         tensor_names = ensure_list_or_tuple(tensor_names, str)
 
         if source:
             self.request_data_from_queue(source)
 
-        assert self.has_data()
-
         results = {name: 0 for name in tensor_names}
         num_examples = 0
-
-        i = 0
+        num_batches = 0
         is_out_of_range = False
-        while not is_out_of_range and self.has_data():
+        log_start_time = time.time()
+        log_start_batches = 0
+        if not self.is_chief:
+            summary_keys = None
+
+        while not is_out_of_range:
+            # Only one thread should access the local queue.
+            current_queue_size = self.current_queue_size()
+            b = max(min(batch_size, current_queue_size), 1)
+
             try:
-                out = self.eval(tensor_names, feed_dict={
-                    'batch_size': batch_size,
-                }, is_training=False)
+                out = self.eval(tensor_names, feed_dict={'batch_size': b, }, is_training=False, summary_keys=summary_keys)
             except (tf.errors.OutOfRangeError, tf.errors.NotFoundError, BlockingIOError) as ex:
                 is_out_of_range = True
             except Exception as ex:
                 raise ex
             else:
-                num_examples += batch_size
-                i += 1
-                for k, v in out.items():
-                    results[k] += v
+                elapsed = time.time() - log_start_time
+                if elapsed > log_every_seconds:
+                    bps = (num_batches - log_start_batches) / elapsed
+                    self.info('Evaluated {:d} examples. batches/s: {:<9.4g}'.format(num_examples, bps), chief_only=False)
+                    log_start_time = time.time()
+                    log_start_batches = num_batches
+                num_examples += b
+                num_batches += 1
+                for k, mean_value in out.items():
+                    # Batch size may be uneven, so compute a weighted mean.
+                    results[k] += mean_value * b
 
-        if i == 0:
+        self.info('Finished eval. Number of examples: {}. Number of batches: {}'.format(num_examples, num_batches))
+
+        if num_batches == 0:
             results = {k: None for k, v in results.items()}
-        elif i > 0:
-            results = {k: (v / i) for k, v in results.items()}
+        elif num_batches > 0:
+            results = {k: (v / num_examples) for k, v in results.items()}
 
-        for k, v in results.items():
-            ret = self.aggregate_mean(v, num_examples)
+        ret = {}
+        for k, mean_value in results.items():
+            # All replicas should call this function.
+            overall_mean, total_num_examples = self.aggregate_mean(mean_value, num_examples)
+            # Only the chief process receives this value.
             if self.is_chief:
-                print(k, ret)
+                self.info('Mean `{}` over {} examples from `{}`: {:.6g}'.format(k, total_num_examples, source, overall_mean))
+                ret[k] = overall_mean
 
-        self._needs_rebuild = True
+        self._needs_rebuild_for_training = True
+
+        self.barrier('eval_scalars/{}'.format(source))
+
+        if self.is_chief:
+            for k, v in ret.items():
+                self.write_scalar_summary(tag='overall/{}'.format(k), value=v, summary_writer_name=source, flush=True)
+
+        self.barrier('write_scalar_summary/{}'.format(source))
+
+        return ret
 
     def eval(self,
              values=None,
@@ -1577,7 +1673,7 @@ class NNModel(metaclass=abc.ABCMeta):
         else:
             if len(summary_keys) == 0:
                 # TODO(daeyun): Log only once.
-                log.warn('Non-default empty `summary_keys`. This was probably not expected.')
+                self.warn('Non-default empty `summary_keys`. This was probably not expected.')
         summary_keys = ensure_list_or_tuple(summary_keys, str)
         start_time = time.time()
 
@@ -1684,7 +1780,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 if local_queue_size < batch_size_value:
                     io_block_detected = True
                     if self.warn_io_bottleneck:
-                        log.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(
+                        self.warn('IO bottleneck detected: worker queue size {} is less than batch size {}.'.format(
                             local_queue_size, batch_size_value))
                 if local_queue_size > 0:
                     break
@@ -1697,21 +1793,20 @@ class NNModel(metaclass=abc.ABCMeta):
                     else:
                         raise BlockingIOError(('Worker queue is empty and queue runner threads are not running. '
                                                'Did you forget to call `.request_data_from_queue()`?'))
-                    log.info('Worker queue is empty. Waiting for data from global queue "{}" (size {}).'.format(
+                    self.info('Worker queue is empty. Waiting for data from global queue "{}" (size {}).'.format(
                         self._current_source_queue_name, self.source_queue_size(self._current_source_queue_name)))
                 time.sleep(min(0.4 * (i + 1), 10))
                 i += 1
 
-        if run_options is None:
-            self.run_metadata = None
-        else:
+        self.run_metadata = None
+        if run_options is not None and (run_options.trace_level != 0 or run_options.output_partition_graphs):
             self.run_metadata = tf.RunMetadata()
 
         with self.graph.as_default():
             out_eval = self.session.run(fetches, new_feed_dict, options=run_options, run_metadata=self.run_metadata)
             if log_elapsed_time or (io_block_detected and self.warn_io_bottleneck):
                 elapsed = time.time() - start_time
-                log.info('Elapsed: %.6f seconds', elapsed)
+                self.info('Elapsed: {:.6f} seconds'.format(elapsed))
 
         if summary_ops:
             if summary_writer_name is None:
@@ -1815,7 +1910,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         directory = path.dirname(save_path)
         if not path.isdir(directory):
-            log.info('mkdir %s', directory)
+            self.info('mkdir {}'.format(directory))
             os.makedirs(directory)
 
         with self.graph.as_default():
@@ -1823,7 +1918,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 assert isinstance(self.saver, tf.train.Saver)
                 self.saver.export_meta_graph(save_path + NNModel._meta_graph_suffix, as_text=True)
             save_path_out = self.saver.save(self.session, save_path, global_step=self.supervisor.global_step, write_meta_graph=False)
-            log.info("Model saved to file: %s" % save_path_out)
+            self.info("Model saved to file: {}".format(save_path_out))
 
     def restore(self, restore_path: str = None):
         """
@@ -1839,7 +1934,7 @@ class NNModel(metaclass=abc.ABCMeta):
         with self.graph.as_default():
             with self.session.as_default():
                 self.saver.restore(self.session, restore_path)
-                log.info("Restored model from %s", restore_path)
+                self.info("Restored model from {}".format(restore_path))
 
     def add_scalar_summary(self, tag: str, value: tf.Tensor, summary_keys=(), name: str = None) -> tf.Tensor:
         """
@@ -1851,12 +1946,12 @@ class NNModel(metaclass=abc.ABCMeta):
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
-                log.info('Adding a new summary key: %s', summary_key)
+                self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 
         with_default_summary_keys = list(summary_keys) + ['scalar']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding scalar summary tag %s to collections %s.', tag, ','.join(collection_keys))
+        self.info('Adding scalar summary tag {} to collections {}.'.format(tag, ','.join(collection_keys)))
         summary_op = tf.scalar_summary(tag, value, collections=collection_keys, name=name)
         return summary_op
 
@@ -1871,7 +1966,7 @@ class NNModel(metaclass=abc.ABCMeta):
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
-                log.info('Adding a new summary key: %s', summary_key)
+                self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 
         with tf.name_scope('histogram_summary_value') as scope:
@@ -1880,7 +1975,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['histogram']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding histogram summary tag %s to collection %s', tag, ','.join(collection_keys))
+        self.info('Adding histogram summary tag {} to collection {}'.format(tag, ','.join(collection_keys)))
         summary_op = tf.histogram_summary(tag=tag, name=name, values=concat_value, collections=collection_keys)
         return summary_op
 
@@ -1902,7 +1997,7 @@ class NNModel(metaclass=abc.ABCMeta):
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
                 self._summary_keys.append(summary_keys)
-                log.info('Adding a new summary key: %s', summary_key)
+                self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 
         shape = value.get_shape().as_list()
@@ -1911,8 +2006,8 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['image']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        log.info('Adding image summary tag %s of shape %s to collections %s. max_images: %d', tag, shape,
-                 ','.join(collection_keys), max_images)
+        self.info('Adding image summary tag {} of shape {} to collections {}. max_images: {}'.format(
+            tag, shape, ','.join(collection_keys), max_images))
         summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collection_keys, name=name)
         return summary_op
 
