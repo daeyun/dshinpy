@@ -392,7 +392,6 @@ def extract_meta_graph_def(clear_devices=True):
     existing_collections = {key: graph.get_collection(key) for key in graph.get_all_collection_keys()}
 
     out_meta_graph_def = meta_graph.create_meta_graph_def()
-    tf.import_graph_def()
     yield out_meta_graph_def
 
     out_gdef = tf.GraphDef()

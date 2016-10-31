@@ -16,4 +16,4 @@ if [[ -d ${BUILD_DIR} ]]; then
     rm -r ${BUILD_DIR}
 fi
 
-python setup.py build --build-base="${BUILD_DIR}" install
+python setup.py install

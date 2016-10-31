@@ -5,16 +5,15 @@ import functools
 import math
 
 import numpy as np
+import tflearn
 import tensorflow as tf
 import typecheck as tc
 
 from dshin.nn import types as nn_types
 from dshin.third_party import gflags
-
-
-# FLAGS = gflags.FLAGS
-
-# gflags.DEFINE_boolean('use_fp16', False, """Train the model using fp16.""")
+from tensorflow.contrib import slim
+from tensorflow.contrib.slim.nets import resnet_v2
+from tensorflow.contrib.slim.nets import resnet_utils
 
 
 def layer(func):
@@ -37,9 +36,21 @@ def _get_model_variable(name: str, shape: tc.seq_of(int), initializer: callable,
     return var
 
 
-@layer
-@tc.typecheck
-def conv2d(input_tensor: nn_types.Value,
+def conv_same_pad(inputs: tf.Tensor, kernel_size=3, rate=1, name='same_pad'):
+    # See tensorflow.contrib.slim.nets.resnet_utils.conv2d_same
+    dims = inputs.get_shape().ndims - 2
+    assert dims in (2, 3)
+
+    with tf.name_scope(name) as scope:
+        kernel_size_effective = kernel_size + (kernel_size - 1) * (rate - 1)
+        pad_total = kernel_size_effective - 1
+        pad_beg = pad_total // 2
+        pad_end = pad_total - pad_beg
+        inputs = tf.pad(inputs, [[0, 0]] + [[pad_beg, pad_end]] * dims + [[0, 0]], name=scope)
+    return inputs
+
+
+def conv2d(input_tensor: tf.Tensor,
            n_out: int,
            k: int = 5,
            s: int = 1,
@@ -61,22 +72,41 @@ def conv2d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(conv, b)
 
 
-@layer
-@tc.typecheck
-def deconv2d(input_tensor: nn_types.Value,
+def upsample_filt(size):
+    """
+    Make a 2D bilinear kernel suitable for upsampling of the given (h, w) size.
+    Source: https://github.com/shelhamer/fcn.berkeleyvision.org/blob/master/surgery.py#L35
+    """
+    factor = (size + 1) // 2
+    if size % 2 == 1:
+        center = factor - 1
+    else:
+        center = factor - 0.5
+    og = np.ogrid[:size, :size]
+    return (1 - abs(og[0] - center) / factor) * \
+           (1 - abs(og[1] - center) / factor)
+
+
+def deconv2d(input_tensor: tf.Tensor,
              n_out: int,
              k: int = 5,
              s: int = 1,
              name: str = 'deconv2d',
              padding: str = 'SAME',
-             use_bias: bool = False) -> tf.Tensor:
+             use_bias: bool = False,
+             bilinear_init=False) -> tf.Tensor:
     assert input_tensor.get_shape().ndims == 4
 
     with tf.variable_scope(name):
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
         stddev = math.sqrt(2.0 / ((k ** 2) / (s ** 2) * n_in))
-        w = _get_model_variable('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+
+        if bilinear_init:
+            w_value = np.tile(upsample_filt(k).reshape(k, k, 1, 1), [1, 1, n_out, n_in])
+            w = _get_model_variable('w', [k, k, n_out, n_in], initializer=tf.constant_initializer(w_value, dtype=tf.float32))
+        else:
+            w = _get_model_variable('w', [k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -99,9 +129,7 @@ def deconv2d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(deconv, b)
 
 
-@layer
-@tc.typecheck
-def conv3d(input_tensor: nn_types.Value,
+def conv3d(input_tensor: tf.Tensor,
            n_out: int,
            k: int = 5,
            s: int = 1,
@@ -123,9 +151,7 @@ def conv3d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(conv, b)
 
 
-@layer
-@tc.typecheck
-def deconv3d(input_tensor: nn_types.Value,
+def deconv3d(input_tensor: tf.Tensor,
              n_out: int,
              k: int = 5,
              s: int = 1,
@@ -137,8 +163,9 @@ def deconv3d(input_tensor: nn_types.Value,
     with tf.variable_scope(name):
         input_shape = input_tensor.get_shape().as_list()
         n_in = input_shape[-1]
-        stddev = math.sqrt(2.0 / ((k ** 3) / (s ** 3) * n_in))
-        w = _get_model_variable('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        # stddev = math.sqrt(2.0 / ((k ** 3) / (s ** 3) * n_in))
+        # w = _get_model_variable('w', [k, k, k, n_out, n_in], initializer=tf.random_normal_initializer(stddev=stddev))
+        w = _get_model_variable('w', [k, k, k, n_out, n_in], initializer=slim.initializers.xavier_initializer())
 
         if type(input_shape[0]) == int:
             batchsize = input_shape[0]
@@ -149,7 +176,7 @@ def deconv3d(input_tensor: nn_types.Value,
         deconv = tf.nn.conv3d_transpose(value=input_tensor, filter=w, output_shape=output_shape, strides=[1, s, s, s, 1], padding=padding)  # type: tf.Tensor
 
         if type(output_shape[0]) != int:
-            output_shape[0] = -1
+            output_shape[0] = None
 
         deconv.set_shape(output_shape)
 
@@ -160,9 +187,7 @@ def deconv3d(input_tensor: nn_types.Value,
         return tf.nn.bias_add(deconv, b)
 
 
-@layer
-@tc.typecheck
-def linear(input_tensor: nn_types.Value,
+def linear(input_tensor: tf.Tensor,
            n_out: int,
            name: str = 'linear',
            use_bias: bool = False) -> tf.Tensor:
@@ -237,14 +262,11 @@ def fixed_pool(value: nn_types.Value, name: str = 'pool') -> nn_types.Value:
     return out
 
 
-@layer
-@tc.typecheck
 def lrelu(input_tensor: nn_types.Value, alpha: float = 0.05, name: str = 'lrelu') -> tf.Tensor:
     """
     Leaky ReLU.
     """
-    with tf.variable_scope(name):
-        return tf.maximum(alpha * input_tensor, input_tensor, name=name)
+    return tflearn.leaky_relu(input_tensor, alpha=alpha, name=name)
 
 
 @tc.typecheck
@@ -464,11 +486,9 @@ def apply_concat(value_list: nn_types.Values, factory: callable, name_prefix: st
     return out
 
 
-@tc.typecheck
-@layer
-def residual_unit(x: nn_types.Value,
-                  is_training: bool,
-                  n_out: tc.optional(int) = None,
+def residual_unit(inputs: tf.Tensor,
+                  is_training,
+                  n_out=None,
                   name: str = 'rn',
                   mode: str = 'SAME',
                   is_first: bool = False) -> tf.Tensor:
@@ -477,7 +497,7 @@ def residual_unit(x: nn_types.Value,
     """
     assert mode in ['DOWNSAMPLE', 'UPSAMPLE', 'SAME']
 
-    shape = x.get_shape().as_list()
+    shape = inputs.get_shape().as_list()
     dims = len(shape) - 2
 
     s = 1 if mode == 'SAME' else 2
@@ -495,7 +515,9 @@ def residual_unit(x: nn_types.Value,
         def shortcut(x):
             split_out = x
             if mode == 'UPSAMPLE':
-                split_out = fixed_unpool(split_out, mode='NEAREST', name='unpool')
+                # split_out = fixed_unpool(split_out, mode='NEAREST', name='unpool')
+                h, w = split_out.get_shape().as_list()[1:3]
+                split_out = tf.image.resize_nearest_neighbor(split_out, [h * 2, w * 2], name='upsample')
             elif mode == 'DOWNSAMPLE':
                 split_out = fixed_pool(split_out, name='pool')
             if n_out > nin:
@@ -511,22 +533,99 @@ def residual_unit(x: nn_types.Value,
             is_first = True
 
         if not is_first:
-            h = shortcut(x)
+            h = shortcut(inputs)
 
-        x = batch_norm(x, is_training, name='bn1')
-        x = lrelu(x, name='relu1')
+        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        # inputs = lrelu(inputs, alpha=0.02, name='relu1')
+        inputs = tf.nn.relu(inputs)
 
         if is_first:
-            h = shortcut(x)
+            h = shortcut(inputs)
 
-        x = conv(x, n_out, k=3, s=s, name='conv1')
+        n_out_bottleneck = n_out // 4
 
-        x = batch_norm(x, is_training, name='bn2')
-        x = lrelu(x, name='relu2')
+        inputs = conv(inputs, n_out_bottleneck, k=1, s=1, name='conv1')
 
-        x = conv(x, n_out, k=3, s=1, name='conv2')
+        if mode == 'DOWNSAMPLE':
+            inputs = conv_same_pad(inputs, kernel_size=3, rate=1)
+            inputs = conv(inputs, n_out_bottleneck, k=3, s=s, name='conv2', padding='VALID')
+        else:
+            inputs = conv(inputs, n_out_bottleneck, k=3, s=s, name='conv2')
 
-        add = tf.add(h, x)
+        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        # inputs = lrelu(inputs, alpha=0.02, name='relu2')
+        inputs = tf.nn.relu(inputs)
+
+        inputs = conv(inputs, n_out, k=1, s=1, name='conv3')
+
+        add = tf.add(h, inputs)
+
+    return add
+
+
+def residual_unit2(inputs: tf.Tensor,
+                   is_training,
+                   n_out=None,
+                   name: str = 'rn',
+                   mode: str = 'SAME',
+                   is_first: bool = False) -> tf.Tensor:
+    """
+    Uses identity shortcut if `n_out` is None.
+    """
+    assert mode in ['DOWNSAMPLE', 'UPSAMPLE', 'SAME']
+
+    shape = inputs.get_shape().as_list()
+    dims = len(shape) - 2
+
+    s = 1 if mode == 'SAME' else 2
+
+    assert dims == 2
+
+    nin = shape[-1]
+    if n_out is None:
+        n_out = nin
+
+    with tf.variable_scope(name):
+        def shortcut(x):
+            split_out = x
+            if mode == 'UPSAMPLE':
+                # split_out = fixed_unpool(split_out, mode='NEAREST', name='unpool')
+                h, w = split_out.get_shape().as_list()[1:3]
+                split_out = tf.image.resize_nearest_neighbor(split_out, [h * 2, w * 2], name='upsample')
+            elif mode == 'DOWNSAMPLE':
+                raise NotImplementedError()
+            if n_out > nin:
+                padding = [[0, 0] for _ in range(len(shape))]
+                padding[-1] = [int(math.floor((n_out - nin) / 2.0)), int(math.ceil((n_out - nin) / 2.0))]
+                assert sum(padding[-1]) == n_out - nin
+                split_out = tf.pad(split_out, padding, mode='CONSTANT', name='pad_shortcut')
+            elif n_out < nin:
+                split_out = conv2d(split_out, n_out, k=1, s=1, name='conv_shortcut')
+            return split_out
+
+        if n_out != nin:
+            is_first = True
+
+        if not is_first:
+            h = shortcut(inputs)
+
+        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        inputs = tf.nn.relu(inputs)
+
+        if is_first:
+            h = shortcut(inputs)
+
+        if s > 1:
+            inputs = deconv2d(inputs, n_out, k=4, s=s, name='conv1')
+        else:
+            inputs = conv2d(inputs, n_out, k=3, s=1, name='conv1')
+
+        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        inputs = tf.nn.relu(inputs)
+
+        inputs = conv2d(inputs, n_out, k=3, s=1, name='conv2')
+
+        add = tf.add(h, inputs)
 
     return add
 

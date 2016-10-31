@@ -126,6 +126,7 @@ def cube(center_xyz=(0, 0, 0), radius=1, ax=None, color='blue', alpha=1,
 
     for s, e, in pts:
         ax.plot3D(*zip(s, e), color=color, alpha=alpha, linewidth=linewidth)
+    return ax
 
 
 class Arrow3D(FancyArrowPatch):
@@ -247,6 +248,9 @@ def plot_mesh(mesh, ax=None):
     ax.set_ylim(bmin[1], bmax[1])
     ax.set_zlim(bmin[2], bmax[2])
     ax.set_aspect('equal')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
 
     return ax
 

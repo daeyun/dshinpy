@@ -178,7 +178,6 @@ class GraphKeys(tf.GraphKeys):
     # Also used: LOSSES, SUMMARIES
 
 
-# noinspection PyBroadException
 class NNModel(metaclass=abc.ABCMeta):
     """
     TensorFlow neural net container.
@@ -643,7 +642,7 @@ class NNModel(metaclass=abc.ABCMeta):
     def _placeholders(self) -> typing.Sequence[typing.Union[tf.Tensor, QueuePlaceholder]]:
         """
         Placeholders defined by the user.
-        Side effect: Populates self.g.
+        Side effect: Populates self.graph.
 
         :return: List of placeholder tensors or QueuePlaceholder objects.
         """
@@ -660,7 +659,7 @@ class NNModel(metaclass=abc.ABCMeta):
     def _optimizer(self) -> tf.Operation:
         """
         Loss minimization operation defined by the user.
-        Side effect: Populates self.g.
+        Side effect: Populates self.graph.
 
         For example:
         ::

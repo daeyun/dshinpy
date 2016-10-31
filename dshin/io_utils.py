@@ -1,9 +1,14 @@
 from os import path
+import tempfile
+
+import stl
 from dshin import log
 import sys
 import os
+import io
 import numpy as np
 import hashlib
+import functools
 
 
 def read_mesh(filename):
@@ -84,6 +89,16 @@ def read_off(filename):
     }
 
 
+def save_stl(mesh, filename):
+    faces = mesh['f']
+    verts = mesh['v']
+    stl_mesh = stl.mesh.Mesh(np.zeros(faces.shape[0], dtype=stl.mesh.Mesh.dtype))
+    for i, f in enumerate(faces):
+        for j in range(3):
+            stl_mesh.vectors[i][j] = verts[f[j], :]
+    stl_mesh.save(filename)
+
+
 def read_ply(filename):
     from plyfile import PlyData
     plydata = PlyData.read(filename)
@@ -145,3 +160,8 @@ def stringify_float_arrays(arr_list, precision=6):
     assert isinstance(arr_list, list), isinstance(arr_list, tuple)
     arr = np.hstack(arr_list).ravel().astype(np.float32)
     return np.array_str(arr, precision=precision, max_line_width=np.iinfo(np.int64).max)
+
+
+def temp_filename(dirname='/tmp', prefix='', suffix=''):
+    temp_name = next(tempfile._get_candidate_names())
+    return path.join(dirname, prefix+temp_name+suffix)

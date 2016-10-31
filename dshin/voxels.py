@@ -1,36 +1,32 @@
 import numpy as np
+import mcubes
 import functools
 
 
 class VoxelGrid(object):
-    def __init__(self, box:np.ndarray, resolution=100):
+    def __init__(self, box: np.ndarray, voxels=None, resolution=100):
+        if isinstance(box, (tuple, list)):
+            box = np.array(box)
         assert box.shape == (2, 3)
         self.bstart = box.min(axis=0)
         self.bend = box.max(axis=0)
         self.resolution = resolution
-        self.voxel_size = (self.bend - self.bstart).max() / float(
-                resolution - 1)
-        self.shape = np.round(
-                ((self.bend - self.bstart) / self.voxel_size + 1)).astype(
-                np.int64)
+        self.voxel_size = (self.bend - self.bstart).max() / float(resolution - 1)
+        self.shape = np.round(((self.bend - self.bstart) / self.voxel_size + 1)).astype(np.int64)
         self.size = np.prod(self.shape)
-        self.values = None
+        self.values = voxels
 
     @functools.lru_cache(maxsize=1, typed=True)
     def xyz(self):
-        xrange = np.arange(self.bstart[0], self.bend[0] + self.voxel_size / 2,
-                           self.voxel_size)
-        yrange = np.arange(self.bstart[1], self.bend[1] + self.voxel_size / 2,
-                           self.voxel_size)
-        zrange = np.arange(self.bstart[2], self.bend[2] + self.voxel_size / 2,
-                           self.voxel_size)
+        xrange = np.arange(self.bstart[0], self.bend[0] + self.voxel_size / 2, self.voxel_size)
+        yrange = np.arange(self.bstart[1], self.bend[1] + self.voxel_size / 2, self.voxel_size)
+        zrange = np.arange(self.bstart[2], self.bend[2] + self.voxel_size / 2, self.voxel_size)
         X, Y, Z = np.meshgrid(xrange, yrange, zrange)
         return np.vstack((X.ravel(), Y.ravel(), Z.ravel())).T
 
     @functools.lru_cache(maxsize=1, typed=True)
     def linear_index_grid(self):
-        return np.ravel_multi_index(np.indices(self.shape), dims=self.shape,
-                                    order='C')
+        return np.ravel_multi_index(np.indices(self.shape), dims=self.shape, order='C')
 
     @functools.lru_cache(maxsize=1, typed=True)
     def multi_index_grid(self):
@@ -50,6 +46,12 @@ class VoxelGrid(object):
         ids = np.arange(self.size)[inimage].astype(np.int32)
         return xy, ids
 
+    def pcl(self, in_voxel_coords=True):
+        if in_voxel_coords:
+            y, x, z = np.where(self.values)
+            pts = np.vstack([x, y, z]).T + 1
+        return pts
+
     def set_values(self, voxel_grid_values):
         assert np.all(voxel_grid_values.shape == self.shape)
         self.values = voxel_grid_values
@@ -65,9 +67,12 @@ class VoxelGrid(object):
 
 
 def voxel_grid_to_mesh(grid, bbox, crossing=0.5):
-    spacing = (bbox[1, :] - bbox[0, :]).max() / (np.array(grid.shape) - 1)
-    from skimage import measure as skimeasure
-    verts, faces = skimeasure.marching_cubes(grid, crossing, spacing=spacing)
+    if isinstance(bbox, (tuple, list)):
+        bbox = np.array(bbox)
+    g = grid.squeeze()
+    spacing = (bbox[1, :] - bbox[0, :]).max() / (np.array(g.shape) - 1)
+    print(spacing)
+    verts, faces = mcubes.marching_cubes(g, crossing)
 
     verts = verts[:, [1, 0, 2]]
     verts += bbox[None, 0, :]

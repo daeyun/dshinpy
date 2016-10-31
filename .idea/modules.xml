@@ -5,6 +5,7 @@
       <module fileurl="file://$USER_HOME$/git/cs440/.idea/cs440.iml" filepath="$USER_HOME$/git/cs440/.idea/cs440.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/dshinpy.iml" filepath="$PROJECT_DIR$/.idea/dshinpy.iml" />
       <module fileurl="file://$PROJECT_DIR$/../multiview_shape/.idea/multiview_shape.iml" filepath="$PROJECT_DIR$/../multiview_shape/.idea/multiview_shape.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../mvshape/.idea/mvshape.iml" filepath="$PROJECT_DIR$/../mvshape/.idea/mvshape.iml" />
     </modules>
   </component>
 </project>

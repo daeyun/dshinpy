@@ -45,6 +45,9 @@ import dshin.data
 import dshin
 
 from tensorflow.examples.tutorials.mnist import input_data
+from tensorflow.contrib import slim
+from tensorflow.contrib.slim.nets import resnet_utils
+from tensorflow.contrib.slim.nets import resnet_v2
 
 
 class MV(nn.NNModel):
@@ -57,18 +60,34 @@ class MV(nn.NNModel):
     def _model(self) -> tf.Tensor:
         x = self.placeholder('input')
         y_ = self.placeholder('target')
+        is_training = self.placeholder('is_training')
 
-        W = tf.Variable(tf.zeros([784, 10]), name='weight')
-        b = tf.Variable(tf.zeros([10]))
-        y = tf.matmul(x, W) + b
-        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(y, y_), name='loss')
+        x = tf.reshape(x, (-1, 28, 28, 1))
 
-        correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
-        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32), name='accuracy')
+        # out, end_points = slim.nets.resnet_v2.resnet_v2_50(x, 10)
 
-        with tf.name_scope('summary'):
-            self.add_scalar_summary('loss', cross_entropy, name='loss')
-            self.add_scalar_summary('accuracy', accuracy, name='accuracy')
+        d=24
+
+        blocks = [
+            resnet_utils.Block('block1', resnet_v2.bottleneck, [(d * 2, d / 2, 1)] * 2 + [(d * 2, d / 2, 2)]),
+            resnet_utils.Block('block2', resnet_v2.bottleneck, [(d * 4, d, 1)] * 3 + [(d * 4, d, 2)]),
+            resnet_utils.Block('block3', resnet_v2.bottleneck, [(256, 64, 1)] * 4 + [(256, 64, 2)]),
+            resnet_utils.Block('block4', resnet_v2.bottleneck, [(512, 128, 1)] * 3),
+        ]
+
+        with slim.arg_scope(resnet_v2.resnet_arg_scope(is_training)):
+            with slim.arg_scope([slim.conv2d], activation_fn=None, normalizer_fn=None):
+                out = resnet_utils.conv2d_same(x, d, 7, stride=2, scope='conv1')
+            out = resnet_utils.stack_blocks_dense(out, blocks, None)
+        out = tf.reduce_mean(out, [1, 2], name='pool5', keep_dims=True)
+        out = slim.conv2d(out, 10, [1, 1], activation_fn=None,
+                          normalizer_fn=None, scope='logits')
+        out = tf.squeeze(out, [1,2])
+
+        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(out, y_), name='loss')
+
+        # correct_prediction = tf.equal(tf.argmax(end_points['predictions'], 1), tf.argmax(y_, 1))
+        # accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32), name='accuracy')
 
         return cross_entropy
 
@@ -97,7 +116,7 @@ class DataFeeder(nn.distributed.TFProcess):
     def _main(self, server: tf.train.Server, net: nn.NNModel):
         assert isinstance(net, nn.NNModel)
 
-        enqueue_batch_size = 51
+        enqueue_batch_size = 100
 
         net.build(
             server,
@@ -134,32 +153,31 @@ class Trainer(nn.distributed.TFProcess):
             # parallel_read_size=20,
         )
         for i in range(1000):
-            losses = net.train(source='train', batch_size=50, summary_keys=['scalar'])
-            net.eval_scalars('eval', ['loss', 'accuracy'], batch_size=55, summary_keys=['scalar'])
+            losses = net.train(source='train', batch_size=100, summary_keys=['scalar'])
+            net.eval_scalars('eval', ['loss', 'accuracy'], batch_size=100, summary_keys=['scalar'])
 
         server.join()
 
 
 def main(_):
     cluster = nn.distributed.get_local_cluster_spec({
-        'ps': 2,
-        'worker': 6,
+        'ps': 1,
+        'worker': 1,
         'data': 1,
     })
 
     # session_config = nn.utils.default_sess_config(log_device_placement=False)
     session_config = None
 
-    log_dir = '/tmp/mnist_test_21'
+    log_dir = '/tmp/mnist_test_23'
 
     while True:
         processes = []
         processes.append(nn.distributed.ParameterServer(cluster, task_id=0, gpu_ids=()))
-        processes.append(nn.distributed.ParameterServer(cluster, task_id=1, gpu_ids=()))
         processes.append(DataFeeder(cluster, job_name='data', task_id=0, nnmodel_class=MV,
                                     experiment_name='mnist_train', logdir=log_dir, gpu_ids=()))
 
-        gpu_ids = [0, 1] + [None] * 4
+        gpu_ids = [0]
 
         for i, gid in enumerate(gpu_ids):
             gpu_ids = [] if gid is None else [gid]
@@ -170,17 +188,14 @@ def main(_):
         for p in processes:
             p.start()
 
-        # for p in processes:
-        #     if not isinstance(p, nn.distributed.ParameterServer):
-        #         p.join()
-        #
-        # for p in processes:
-        #     if isinstance(p, nn.distributed.ParameterServer):
-        #         p.terminate()
+        for p in processes:
+            if not isinstance(p, nn.distributed.ParameterServer):
+                p.join()
 
-        time.sleep(1000000)
-        print('done!!')
+        for p in processes:
+            if isinstance(p, nn.distributed.ParameterServer):
+                p.terminate()
 
 
 if __name__ == '__main__':
-    tf.app.run(main)
+    tf.app.run()

@@ -87,9 +87,9 @@ class CountingQueueRunner(object):
                 else:
                     sess.run(self._enqueue_op)
             except tf.errors.OutOfRangeError as ex:
-                self._net.info('Closing {}.'.format(self.queue.name))
-                sess.run(self._close_op)
                 break
+        self._net.info('Closing {}.'.format(self.queue.name))
+        sess.run(self._close_op)
         self._net.info('Queue runner for {} reached end of epoch (source {}).'.format(self.queue.name, self.source_name))
         # If one thread stops, others should too.
         self.request_stop()
@@ -326,26 +326,8 @@ class NNModel(metaclass=abc.ABCMeta):
         self._lock = threading.RLock()
         self._train_step_start_time = None
 
-        self._thread = threading.Thread(target=self._monitoring_thread_routine, daemon=True)
-        self._thread.start()
-
-    def _monitoring_thread_routine(self):
-        while True:
-            time.sleep(0.2)
-            if self._train_step_start_time is not None:
-                elapsed = time.time() - self._train_step_start_time
-                if elapsed > 20:
-                    self._train_step_start_time = None
-                    with self._lock:
-                        self.info('Interrupting training step.')
-                        if self.is_chief:
-                            self.save()
-                        config = self.server.server_def.default_session_config
-                        tf.Session.reset(self.server.target, containers=['default-vars'], config=config)
-                        self.session = self.prepare_or_wait_for_session()
-
     def _optimizer(self, learning_rate):
-        return tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-6)
+        return tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-6, use_locking=True)
 
     def default_placeholders(self) -> typing.Sequence[tf.Tensor]:
         return [
@@ -532,6 +514,8 @@ class NNModel(metaclass=abc.ABCMeta):
         if server is None:
             self.info('`tf.train.Server` was not provided. Creating a local server.')
             server = tf.train.Server.create_local_server()
+        if sync_replicas:
+            raise NotImplementedError()
 
         assert isinstance(server, tf.train.Server)
         self.server = server
@@ -584,8 +568,14 @@ class NNModel(metaclass=abc.ABCMeta):
 
         worker_device_name = self.local_device_name()
         self.info('Device name is {}'.format(worker_device_name))
-        device_setter = tf.train.replica_device_setter(worker_device=worker_device_name,
-                                                       cluster=server.server_def.cluster)
+        if 'ps' in self.cluster_spec.as_dict():
+            device_setter = tf.train.replica_device_setter(worker_device=worker_device_name,
+                                                           ps_tasks=self.cluster_spec.num_tasks('ps'),
+                                                           cluster=server.server_def.cluster)
+        else:
+            device_setter = tf.train.replica_device_setter(worker_device=worker_device_name,
+                                                           ps_device='/job:worker',
+                                                           cluster=server.server_def.cluster)
 
         with self.graph.as_default(), tf.device(device_setter):
             if seed is not None:
@@ -609,7 +599,12 @@ class NNModel(metaclass=abc.ABCMeta):
                     use_locking=True
                 )
 
-            minimize_op = optim.minimize(loss, global_step=self.variable('global_step'))
+            grads_and_vars = optim.compute_gradients(loss, aggregation_method=2)
+            minimize_op = optim.apply_gradients(grads_and_vars, global_step=self.variable('global_step'))
+
+            # with tf.name_scope('gradient_summary'):
+            #     for grad, var in grads_and_vars:
+            #         self.add_scalar_summary('gradients/{}'.format(var.name.split(':')[0]), tf.reduce_mean(grad), summary_keys=('gradient_summary',))
 
             with tf.variable_scope(self._optimizer_prefix):
                 with tf.name_scope('minimize') as scope:
@@ -631,6 +626,40 @@ class NNModel(metaclass=abc.ABCMeta):
                         init_tokens_op = optim.get_init_tokens_op()
                         local_step_init_op = optim.local_step_init_op
                         ready_for_local_init_op = optim.ready_for_local_init_op
+
+            deltas_and_names = []
+            # Update ratios of all trainable variables.
+            with tf.name_scope('delta'):
+                # `eps` prevents dividing by zero.
+                eps = 1e-8
+                # A dict with names as keys.
+                var_norms = nn_ops.trainable_variable_norms(name='weight_norms')
+                with tf.control_dependencies(var_norms):
+                    with tf.control_dependencies([tf.group(minimize_op, name='train_wait')]):
+                        updated_var_norms = nn_ops.trainable_variable_norms(name='updated_weight_norms')
+                        for var_name, updated_norm in updated_var_norms.items():
+                            prev_norm = var_norms[var_name]
+                            tag = 'delta/' + var_name.replace(':0', '').replace(':', '_')
+                            with tf.name_scope(tag) as subscope:
+                                delta = tf.abs(tf.div((prev_norm - updated_norm), prev_norm + eps), name=subscope)
+                                deltas_and_names.append((delta, var_name.split(':')[0]))
+                grouped_deltas = collections.defaultdict(list)
+                for delta, name in deltas_and_names:
+                    grouped_deltas[name.split('/')[0]].append(tf.reduce_mean(delta))
+                for name_prefix, deltas in grouped_deltas.items():
+                    mean_delta = tf.reduce_mean(deltas, name='{}/update_ratio'.format(name_prefix))
+                    self.add_scalar_summary('delta/{}'.format(name_prefix), mean_delta, summary_keys=('update_ratios',))
+
+            trainable_vars = collections.defaultdict(list)
+            with tf.name_scope('trainable_var_histograms'):
+                for v in tf.trainable_variables():
+                    var_name = v.name
+                    with tf.get_default_graph().colocate_with(v):
+                        v = tf.identity(v)
+                        name_prefix = var_name.split('/')[0]
+                        trainable_vars[name_prefix].append(v)
+                for name_prefix, var_list in trainable_vars.items():
+                    self.add_scalar_summary('trainable/{}'.format(name_prefix), tf.global_norm(var_list), summary_keys=('weights',))
 
             # Exclude any queue-specific variables.
             vars_to_save = []
@@ -670,10 +699,14 @@ class NNModel(metaclass=abc.ABCMeta):
                 reset_count = tf.Variable(0, trainable=False, dtype=tf.int32, name='session_reset_count')
                 tf.assign_add(reset_count, 1, use_locking=True, name='increment_session_reset_count')
 
-                with self.container('atomic_counter'):
+                with self.container('atomic-counter'):
                     counter_queue = tf.FIFOQueue(-1, dtypes=tf.int32, shared_name='atomic_counter', name='atomic_counter')
                     reset_counter_op = counter_queue.enqueue_many(vals=np.arange(self.num_replicas), name='reset_counter')
                     counter_queue.dequeue('count')
+
+                is_oor = tf.Variable(False, name='is_oor', dtype=tf.bool)
+                tf.assign(is_oor, True, use_locking=True, name='set_is_oor')
+                tf.assign(is_oor, False, use_locking=True, name='unset_is_oor')
 
             vars_to_init = {tf.is_variable_initialized(v): v for v in tf.all_variables()}
             init_op = tf.initialize_all_variables()
@@ -770,21 +803,22 @@ class NNModel(metaclass=abc.ABCMeta):
             self.info('global_step: {:d}'.format(self.eval('global_step')))
             self.info('learning_rate: {:.5f}'.format(self.eval('learning_rate')))
 
-    def barrier(self, name, verbose=False, timeout=None):
+    def barrier(self, name, verbose=False, skip_logging=False, timeout=None):
         """
         Implemented using a queue. Forces all workers to wait until they all reach the same point.
         :param name: Currently only used for logging.
         :param verbose: If True, logs entry and release, with elapsed time.
         """
-        start_time = time.time()
-        (self.info if verbose else self.debug)('Waiting for barrier {}.'.format(name))
+        if not skip_logging:
+            start_time = time.time()
+            (self.info if verbose else self.debug)('Waiting for barrier {}.'.format(name))
         if timeout is not None:
             options = tf.RunOptions(timeout_in_ms=timeout)
         else:
             options = None
-        with self._lock:
-            entry_id = self.session.run(self.tensor('nn_sync/barrier:0'), options=options)
-        (self.info if verbose else self.debug)('Passed barrier {0}. Entry id: {1}. Time elapsed: {2:.3g} seconds'.format(name, entry_id, time.time() - start_time))
+        entry_id = self.session.run(self.tensor('nn_sync/barrier:0'), options=options)
+        if not skip_logging:
+            (self.info if verbose else self.debug)('Passed barrier {0}. Entry id: {1}. Time elapsed: {2:.3g} seconds'.format(name, entry_id, time.time() - start_time))
         return entry_id
 
     def atomic_counter(self):
@@ -993,7 +1027,8 @@ class NNModel(metaclass=abc.ABCMeta):
                         for i, reader in enumerate(self._tf_record_readers[:parallel_read_size]):
                             with self.container('filename-queues'):
                                 q = tf.FIFOQueue(capacity=parallel_read_size, dtypes=tf.string,
-                                                 name='filename_queue/{}'.format(i))
+                                                 name='filename_queue/{}'.format(i),
+                                                 shared_name='filename_queue/{}_{}_{}_{}_{}'.format(source_queue, self.job_name, self.task_id, i, parallel_read_size))
                             # Enqueue and dequeue immediately. `tf.TFRecordReader.read` requires a queue as input.
                             # `value` is one of the filename values atomically dequeued from the source queue.
                             with tf.control_dependencies([q.enqueue(value[i])]):
@@ -1103,6 +1138,8 @@ class NNModel(metaclass=abc.ABCMeta):
                      Shape of the tensors will be `placeholder_spec.shape[1:]`
             queue: The `tf.FIFOQueue` object. Not needed in most use cases.
         """
+        # Must be from the same graph.
+        self._tf_record_readers = []
         with tf.variable_scope('{}/'.format(name)):
             # One local queue, multiple enqueue operations.
 
@@ -1353,20 +1390,23 @@ class NNModel(metaclass=abc.ABCMeta):
         return ret
 
     def train(self,
+              batch_size,
               feed_dict=None,
-              batch_size=None,
+              num_examples=0,
               source='train',
               summary_keys=None,
               check_placeholder_coverage=True,
               summary_steps=None,
+              summary_writer_name=None,
               run_options=None,
               log_elapsed_time=False,
-              log_every_seconds=5):
+              log_every_step=5):
         """
         Trains until the end of current epoch.
         """
         if self._needs_rebuild_for_training:
-            self.rebuild()
+            # self.rebuild()
+            self.reset_session(containers=['{}/{}'.format(self._source_queue_prefix, source)])
 
         if summary_steps is None and summary_keys is not None:
             summary_steps = {key: 1 for key in summary_keys}
@@ -1379,29 +1419,25 @@ class NNModel(metaclass=abc.ABCMeta):
         log_start_time = time.time()
         log_start_i = i
         is_out_of_range = False
-        num_examples = 0
+
+        if not self.is_chief:
+            summary_keys = None
 
         if source:
-            self.request_data_from_queue(source)
-            if batch_size:
-                self.set_default_batch_size(source, batch_size)
+            self.request_data_from_queue(source, max_size=num_examples)
+            self.set_default_batch_size(source, batch_size)
 
-        assert self.has_data()
+        if feed_dict is not None:
+            assert 'batch_size' not in feed_dict
+            assert self.placeholder('batch_size') not in feed_dict
+
         self.barrier('train/start'.format(source))
+        global_step = self.current_global_step()
+        num_examples_trained = 0
 
-        while not is_out_of_range and self.has_data():
+        while True:
             if summary_keys is not None:
-                keys = [key for key in summary_keys if i % summary_steps[key] == 0]
-            if not self.is_chief:
-                keys = None
-
-            if feed_dict is not None and 'batch_size' in feed_dict:
-                batch_size = feed_dict['batch_size']
-            elif feed_dict is not None and self.placeholder('batch_size') in feed_dict:
-                batch_size = feed_dict[self.placeholder('batch_size')]
-            else:
-                batch_size = self.default_batch_size(self._current_source_queue_name)
-            assert isinstance(batch_size, int) or (np.issubdtype(batch_size, np.ndarray) and np.issubdtype(batch_size, np.int))
+                keys = [key for key in summary_keys if i % summary_steps[key] == 0 and i > 0] or None
 
             # If the last batch size is smaller than batch_size, it will be ignored.
             try:
@@ -1410,33 +1446,36 @@ class NNModel(metaclass=abc.ABCMeta):
                 # TODO(daeyun): Last training step should be asynchronous.
                 if i == 0:
                     self.debug('Starting first training step.')
-                else:
-                    with self._lock:
-                        self._train_step_start_time = time.time()
                 batch_loss, global_step = self.train_step(feed_dict=feed_dict,
                                                           summary_keys=keys,
                                                           check_placeholder_coverage=check_placeholder_coverage and i == 0,
                                                           run_options=run_options,
-                                                          log_elapsed_time=log_elapsed_time)
+                                                          log_elapsed_time=log_elapsed_time,
+                                                          summary_writer_name=summary_writer_name)
                 if i == 0:
                     self.debug('Finished first training step.')
-            except tf.errors.OutOfRangeError as ex:
-                break
-            except (tf.errors.NotFoundError, BlockingIOError, tf.errors.AbortedError, tf.errors.CancelledError) as ex:
+            except (tf.errors.OutOfRangeError, BlockingIOError) as ex:
+                is_out_of_range = True
+                pass
+            except (tf.errors.NotFoundError, tf.errors.AbortedError, tf.errors.CancelledError) as ex:
                 self.debug('train_step was interrupted {}'.format(ex))
-                break
+                raise ex
             else:
                 i += 1
-                num_examples += batch_size
+                num_examples_trained += batch_size
                 current_losses.append(batch_loss)
                 losses.append(batch_loss)
-            finally:
-                with self._lock:
-                    self._train_step_start_time = None
 
-            elapsed_since_last_log = time.time() - log_start_time
+            # if is_out_of_range:
+            #     self.session.run(self.tensor('nn_sync/set_is_oor'))
+            # self.barrier('train/step', skip_logging=True)
+            # if self.session.run(self.tensor('nn_sync/is_oor')):
+            #     break
+            if is_out_of_range:
+                break
 
-            if (elapsed_since_last_log >= log_every_seconds) and len(current_losses) > 0:
+            if (i % log_every_step == 0) and len(current_losses) > 0:
+                elapsed_since_last_log = time.time() - log_start_time
                 bps = (i - log_start_i) / elapsed_since_last_log
                 valids = np.isfinite(current_losses)
                 current_losses = np.array(current_losses)
@@ -1444,7 +1483,8 @@ class NNModel(metaclass=abc.ABCMeta):
                     mean_loss = current_losses[valids].mean()
                 else:
                     mean_loss = current_losses[0]
-                self.info('Training. global_step: {:<9d} batches/s: {:<9.4g} loss: {:<9.6g}'.format(global_step, bps, mean_loss), chief_only=False)
+                self.info('Training. global_step: {:<9d} batches/s: {:<9.4g} loss: {:<9.6g}. ({}, {})'.format(global_step, bps, mean_loss, num_examples_trained, i),
+                          chief_only=False)
                 if (~valids).any():
                     self.warn('{} invalid loss values detected.'.format((~valids).sum()))
                 log_start_time = time.time()
@@ -1454,22 +1494,23 @@ class NNModel(metaclass=abc.ABCMeta):
         if len(losses) <= 0:
             self.warn('Training failed. Make sure data is available in the queue.')
         else:
-            self.info('End of training epoch. Examples: {}  Batches: {}  Loss: {:.6g}'.format(num_examples, i, np.mean(losses)))
+            self.info('End of training epoch. Examples: {}  Batches: {}  Loss: {:.6g}'.format(num_examples_trained, i, np.mean(losses)))
 
         self.barrier('train')
 
         if self.is_chief:
+            self.session.run(self.tensor('nn_sync/unset_is_oor'))
             self.save()
 
         self.barrier('train/save')
 
         self._needs_rebuild_for_training = True
 
-        if len(losses) > 0 and num_examples > 0:
-            overall_mean, total_num_examples = self.aggregate_mean(np.mean(losses), num_examples)
+        if len(losses) > 0 and num_examples_trained > 0:
+            overall_mean, total_num_examples = self.aggregate_mean(np.mean(losses), num_examples_trained)
             if self.is_chief:
                 self.info('Overall training loss was {:.6g} over {} examples.'.format(overall_mean, total_num_examples))
-                self.write_scalar_summary(tag='overall/loss', value=overall_mean, summary_writer_name='train', flush=True)
+                self.write_scalar_summary(tag='loss/loss_all', value=overall_mean, summary_writer_name='train', flush=True)
         else:
             self.aggregate_mean(None, None)
 
@@ -1481,6 +1522,7 @@ class NNModel(metaclass=abc.ABCMeta):
                    summary_keys=None,
                    check_placeholder_coverage=True,
                    run_options=None,
+                   summary_writer_name=None,
                    log_elapsed_time=False):
         """
         Runs a training step.
@@ -1495,7 +1537,8 @@ class NNModel(metaclass=abc.ABCMeta):
         assert len(self.graph.get_collection('loss_to_minimize')) == 1  # Sanity check.
         loss = self.graph.get_collection('loss_to_minimize')[0]
         return self.eval([loss, self.tensor('global_step')], feed_dict=feed_dict, is_training=True, summary_keys=summary_keys,
-                         check_placeholder_coverage=check_placeholder_coverage, run_options=run_options, log_elapsed_time=log_elapsed_time, return_dict=False)
+                         check_placeholder_coverage=check_placeholder_coverage, run_options=run_options, log_elapsed_time=log_elapsed_time, return_dict=False,
+                         summary_writer_name=summary_writer_name)
 
     def enqueue(self, name, feed_dict: dict):
         assert not self.needs_initialization, 'Variables are not initialized.'
@@ -1529,6 +1572,7 @@ class NNModel(metaclass=abc.ABCMeta):
             self.placeholder('learning_rate'): learning_rate
         })
         assert abs((learning_rate - new_learning_rate) / learning_rate) < 1e-7
+        self.info('New learning rate is {:.6g}'.format(learning_rate))
 
     def current_learning_rate(self):
         return self.session.run(self.variable('learning_rate'))
@@ -1557,31 +1601,39 @@ class NNModel(metaclass=abc.ABCMeta):
             return self.default_batch_sizes[queue_name]
         return None
 
-    def eval_scalars(self, source, tensor_names, batch_size=1, log_every_seconds=5, summary_keys=None):
+    def eval_scalars(self, source, tensor_names, batch_size=1, num_examples=0, log_every_seconds=5, summary_keys=None, summary_steps=None):
         if self._needs_rebuild_for_training:
             self.reset_session(containers=['{}/{}'.format(self._source_queue_prefix, source)])
 
         tensor_names = ensure_list_or_tuple(tensor_names, str)
 
         if source:
-            self.request_data_from_queue(source)
+            self.request_data_from_queue(source, max_size=num_examples)
 
         results = {name: 0 for name in tensor_names}
-        num_examples = 0
         num_batches = 0
         is_out_of_range = False
         log_start_time = time.time()
         log_start_batches = 0
+        if summary_steps is None and summary_keys is not None:
+            summary_steps = {key: 1 for key in summary_keys}
+        elif summary_keys is None and summary_steps is not None:
+            summary_keys = list(summary_steps.keys())
         if not self.is_chief:
             summary_keys = None
 
+        num_examples_trained = 0
+        keys = None
         while not is_out_of_range:
+            if summary_keys is not None:
+                keys = [key for key in summary_keys if num_batches % summary_steps[key] == 0] or None
+
             # Only one thread should access the local queue.
             current_queue_size = self.current_queue_size()
             b = max(min(batch_size, current_queue_size), 1)
 
             try:
-                out = self.eval(tensor_names, feed_dict={'batch_size': b, }, is_training=False, summary_keys=summary_keys)
+                out = self.eval(tensor_names, feed_dict={'batch_size': b, }, is_training=False, summary_keys=keys, summary_writer_name=source)
             except (tf.errors.OutOfRangeError, tf.errors.NotFoundError, BlockingIOError) as ex:
                 is_out_of_range = True
             except Exception as ex:
@@ -1590,26 +1642,26 @@ class NNModel(metaclass=abc.ABCMeta):
                 elapsed = time.time() - log_start_time
                 if elapsed > log_every_seconds:
                     bps = (num_batches - log_start_batches) / elapsed
-                    self.info('Evaluated {:d} examples. batches/s: {:<9.4g}'.format(num_examples, bps), chief_only=False)
+                    self.info('Evaluated {:d} examples. batches/s: {:<9.4g}'.format(num_examples_trained, bps), chief_only=False)
                     log_start_time = time.time()
                     log_start_batches = num_batches
-                num_examples += b
+                num_examples_trained += b
                 num_batches += 1
                 for k, mean_value in out.items():
                     # Batch size may be uneven, so compute a weighted mean.
                     results[k] += mean_value * b
 
-        self.info('Finished eval. Number of examples: {}. Number of batches: {}'.format(num_examples, num_batches))
+        self.info('Finished eval. Number of examples: {}. Number of batches: {}'.format(num_examples_trained, num_batches))
 
         if num_batches == 0:
             results = {k: None for k, v in results.items()}
         elif num_batches > 0:
-            results = {k: (v / num_examples) for k, v in results.items()}
+            results = {k: (v / num_examples_trained) for k, v in results.items()}
 
         ret = {}
         for k, mean_value in results.items():
             # All replicas should call this function.
-            overall_mean, total_num_examples = self.aggregate_mean(mean_value, num_examples)
+            overall_mean, total_num_examples = self.aggregate_mean(mean_value, num_examples_trained)
             # Only the chief process receives this value.
             if self.is_chief:
                 self.info('Mean `{}` over {} examples from `{}`: {:.6g}'.format(k, total_num_examples, source, overall_mean))
@@ -1621,7 +1673,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if self.is_chief:
             for k, v in ret.items():
-                self.write_scalar_summary(tag='overall/{}'.format(k), value=v, summary_writer_name=source, flush=True)
+                self.write_scalar_summary(tag='loss/{}'.format(k), value=v, summary_writer_name=source, flush=True)
 
         self.barrier('write_scalar_summary/{}'.format(source))
 
@@ -1945,7 +1997,7 @@ class NNModel(metaclass=abc.ABCMeta):
         ensure_list_or_tuple(summary_keys, str)
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
-                self._summary_keys.append(summary_keys)
+                self._summary_keys.extend(summary_keys)
                 self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 
@@ -1965,7 +2017,7 @@ class NNModel(metaclass=abc.ABCMeta):
         ensure_list_or_tuple(values, tf.Tensor)
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
-                self._summary_keys.append(summary_keys)
+                self._summary_keys.extend(summary_keys)
                 self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 
@@ -1996,7 +2048,7 @@ class NNModel(metaclass=abc.ABCMeta):
         ensure_list_or_tuple(summary_keys, str)
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
-                self._summary_keys.append(summary_keys)
+                self._summary_keys.extend(summary_keys)
                 self.info('Adding a new summary key: {}'.format(summary_key))
         assert set(summary_keys).issubset(self._summary_keys)
 

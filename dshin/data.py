@@ -227,6 +227,13 @@ class DataSource(object):
 
         return out
 
+    def skip(self, key, num_batches, batch_size=1):
+        paginator = self.paginator(key)
+        assert paginator.count > 0
+
+        for i in range(num_batches):
+            paginator.next(batch_size)
+
     def _next(self, key, batch_size=1, is_seamless=True):
         """
         Returns the next batch. If `is_seamless` is False, returns ``None`` after each iteration.
@@ -254,7 +261,22 @@ class DataSource(object):
             # Indicates end of one iteration.
             return None
 
-        return [self._post_process(r) for r in rows]
+        # Merge rows into a batch.
+        keys = []
+        batch = []
+        for row in rows:
+            row_dict = self._post_process(row)
+            if not keys:
+                keys = list(row_dict.keys())
+            else:
+                assert keys == list(row_dict.keys()), 'Inconsistent keys: {}'.format(list(row_dict.keys()))
+            batch.append(row_dict)
+
+        out = {}
+        for key in keys:
+            out[key] = [item[key] for item in batch]
+
+        return out
 
     def _post_process(self, row_dict):
         """
