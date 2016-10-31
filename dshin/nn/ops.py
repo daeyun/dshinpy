@@ -386,7 +386,10 @@ def batch_norm(value: nn_types.Value,
     n_out = shape[-1]
     with tf.variable_scope(name) as scope:
         beta = _get_model_variable('offset', shape=[n_out], initializer=tf.constant_initializer(offset), trainable=is_trainable)
-        gamma = _get_model_variable('scale', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
+        if scale is None:
+            gamma = None
+        else:
+            gamma = _get_model_variable('scale', shape=[n_out], initializer=tf.constant_initializer(scale), trainable=is_trainable)
 
         batch_mean, batch_var = tf.nn.moments(value, axes, name=scope.original_name_scope)
         batch_var = tf.nn.relu(batch_var, name='var')  # Force positive value. Renaming `variance` to `var`.
@@ -535,7 +538,8 @@ def residual_unit(inputs: tf.Tensor,
         if not is_first:
             h = shortcut(inputs)
 
-        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        # inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        inputs = batch_norm(inputs, is_local=is_training, ema_decay=0.997, is_trainable=True, name='bn1')
         # inputs = lrelu(inputs, alpha=0.02, name='relu1')
         inputs = tf.nn.relu(inputs)
 
@@ -552,7 +556,8 @@ def residual_unit(inputs: tf.Tensor,
         else:
             inputs = conv(inputs, n_out_bottleneck, k=3, s=s, name='conv2')
 
-        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        # inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        inputs = batch_norm(inputs, is_local=is_training, ema_decay=0.997, is_trainable=True, name='bn2')
         # inputs = lrelu(inputs, alpha=0.02, name='relu2')
         inputs = tf.nn.relu(inputs)
 
@@ -609,7 +614,8 @@ def residual_unit2(inputs: tf.Tensor,
         if not is_first:
             h = shortcut(inputs)
 
-        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        # inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn1')
+        inputs = batch_norm(inputs, is_local=is_training, ema_decay=0.997, is_trainable=True, name='bn1')
         inputs = tf.nn.relu(inputs)
 
         if is_first:
@@ -620,7 +626,8 @@ def residual_unit2(inputs: tf.Tensor,
         else:
             inputs = conv2d(inputs, n_out, k=3, s=1, name='conv1')
 
-        inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        # inputs = slim.batch_norm(inputs, activation_fn=None, decay=0.997, epsilon=1e-5, scale=True, is_training=is_training, scope='bn2')
+        inputs = batch_norm(inputs, is_local=is_training, ema_decay=0.997, is_trainable=True, name='bn2')
         inputs = tf.nn.relu(inputs)
 
         inputs = conv2d(inputs, n_out, k=3, s=1, name='conv2')
