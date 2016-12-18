@@ -142,7 +142,7 @@ class Arrow3D(FancyArrowPatch):
 
 
 def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
-                   text=None):
+                   text=None, zorder=None):
     a = Arrow3D(xs, ys, zs, mutation_scale=tip_size, lw=linewidth,
                 arrowstyle="-|>", color=color)
     ax.add_artist(a)
@@ -155,7 +155,7 @@ def draw_one_arrow(xs, ys, zs, ax, color='red', linewidth=1, tip_size=10,
         ax.text(text_x, text_y, text_z, text, color='black')
 
 
-def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None):
+def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None, linewidth=1, tip_size=10):
     if type(start_pts) != np.ndarray:
         start_pts = np.array(start_pts)
     if type(end_pts) != np.ndarray:
@@ -171,7 +171,7 @@ def draw_arrow_3d(start_pts, end_pts, ax=None, colors='red', texts=None):
         color = colors[i] if isinstance(colors, list) or isinstance(colors,
                                                                     np.ndarray) else colors
         text = texts[i] if isinstance(texts, list) else None
-        draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text)
+        draw_one_arrow(xs[i, :], ys[i, :], zs[i, :], ax, color=color, text=text, linewidth=linewidth, tip_size=tip_size)
     return ax
 
 
@@ -202,7 +202,7 @@ def draw_camera(Rt, ax=None, scale=10):
     R = Rt[:, :3]
 
     arrow_start = np.tile(cam_xyz, [3, 1])
-    arrow_end = scale * R + cam_xyz
+    arrow_end = -(scale * R) + cam_xyz
 
     draw_arrow_3d(arrow_start, arrow_end, ax, colors=['red', 'blue', 'green'],
                   texts=['x', 'y', 'z'])

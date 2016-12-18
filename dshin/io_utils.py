@@ -1,14 +1,22 @@
-from os import path
-import tempfile
-
-import stl
-from dshin import log
-import sys
-import os
-import io
-import numpy as np
+import contextlib
+import ujson
+import copy
+import errno
+import fcntl
 import hashlib
-import functools
+import json
+import numbers
+import os
+import sys
+import tempfile
+import time
+from os import path
+
+import numpy as np
+import plyfile
+import stl
+
+from dshin import log
 
 
 def read_mesh(filename):
@@ -100,15 +108,36 @@ def save_stl(mesh, filename):
 
 
 def read_ply(filename):
-    from plyfile import PlyData
-    plydata = PlyData.read(filename)
-    v = np.vstack((plydata['vertex']['x'], plydata['vertex']['y'],
-                   plydata['vertex']['z'])).T
-    inds = plydata['face']['vertex_indices']
-    f = np.vstack(([i for i in inds]))
+    plydata = plyfile.PlyData.read(filename)
+    if 'vertex' in plydata and plydata['vertex']['x'].size > 0:
+        v = np.vstack((plydata['vertex']['x'], plydata['vertex']['y'],
+                       plydata['vertex']['z'])).T
+    else:
+        v = np.array([]).reshape([0, 3])
+
+    if 'face' in plydata and plydata['face']['vertex_indices'].size > 0:
+        inds = plydata['face']['vertex_indices']
+        f = np.vstack(([i for i in inds]))
+    else:
+        f = np.array([]).reshape([0, 3])
+
     return {
         'v': v,
         'f': f,
+    }
+
+
+def read_ply_pcl(filename):
+    plydata = plyfile.PlyData.read(filename)
+    v = np.vstack((plydata['vertex']['x'], plydata['vertex']['y'], plydata['vertex']['z'])).T
+    normals = np.vstack((plydata['vertex']['nx'], plydata['vertex']['ny'], plydata['vertex']['nz'])).T
+    values = plydata['vertex']['value'].T
+    confidence = plydata['vertex']['confidence'].T
+    return {
+        'v': v,
+        'confidence': confidence,
+        'normals': normals,
+        'value': values,
     }
 
 
@@ -164,4 +193,230 @@ def stringify_float_arrays(arr_list, precision=6):
 
 def temp_filename(dirname='/tmp', prefix='', suffix=''):
     temp_name = next(tempfile._get_candidate_names())
-    return path.join(dirname, prefix+temp_name+suffix)
+    return path.join(dirname, prefix + temp_name + suffix)
+
+
+def save_points_ply(out_filename, points, normals, values, confidence, text=False, scale_normals_by_confidence=True):
+    assert points.shape == normals.shape
+    assert points.shape[1] == 3
+    assert points.ndim == 2
+
+    dirname = path.dirname(out_filename)
+    if not path.isdir(dirname):
+        os.makedirs(dirname)
+        log.info('mkdir -p {}'.format(dirname))
+
+    if values.ndim == 1:
+        values = values[:, None]
+    if confidence.ndim == 1:
+        confidence = confidence[:, None]
+
+    # Replace 0 confidence values with a small number to avoid zero-length normals.
+    confidence = confidence.copy()
+    confidence[np.isclose(confidence, 0.0)] = 1e-3
+
+    if scale_normals_by_confidence:
+        normals = normals.copy() * confidence
+    xyz_nxyz = np.concatenate([points, normals, values, confidence], axis=1)
+    vertex = np.core.records.fromarrays(xyz_nxyz.T, names='x, y, z, nx, ny, nz, value, confidence', formats='f4, f4, f4, f4, f4, f4, f4, f4')
+
+    el = plyfile.PlyElement.describe(vertex, 'vertex')
+    ply = plyfile.PlyData([el], text=text)
+    ply.write(out_filename)
+
+    # Replace \r\n with \n.
+    with open(out_filename, 'rb') as f:
+        content = f.read()
+    beginning = content[:128]
+    rest = content[128:]
+    beginning = beginning.replace(b'ply\r\n', b'ply\n')
+
+    with open(out_filename, 'wb') as f:
+        f.write(beginning + rest)
+
+    return ply
+
+
+@contextlib.contextmanager
+def open_locked(filename, mode='r+', sleep_seconds=0.2, verbose=True, **kwargs):
+    """
+    If `filename` does not exist, `mode` cannot be "r" or "r+".
+    Parent directories are created if they do not exist.
+    """
+    dirname = path.dirname(filename)
+
+    if 'r' in mode and not path.isfile(filename):
+        raise FileNotFoundError('{} does not exist. `mode` cannot be {}.'.format(filename, mode))
+
+    if not path.isdir(dirname):
+        log.info('mkdir -p {}'.format(dirname))
+        os.makedirs(dirname)
+
+    with open(filename, mode, **kwargs) as fd:
+        start_time = time.time()
+        try:
+            i = 0
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except IOError as e:
+                    if e.errno != errno.EAGAIN:
+                        raise e
+                    else:
+                        time.sleep(sleep_seconds)
+                        if verbose and i > 0 and i % 10 == 0:
+                            log.warning('Waiting for a locked file {}. Elapsed: {:.3g} seconds.'.format(filename, time.time() - start_time))
+                        i += 1
+            yield fd
+
+            fd.flush()
+
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class SimpleJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif hasattr(obj, 'dtype') and np.isscalar(obj):
+            return obj.item()
+        elif isinstance(obj, set):
+            return tuple(obj)
+        elif isinstance(obj, bytes):
+            return obj.decode('utf-8')
+        return json.JSONEncoder.default(self, obj)
+
+
+@contextlib.contextmanager
+def open_locked_json(filename):
+    with open_locked(filename, mode='a+') as f:
+        f.seek(0)
+        try:
+            content = f.read()
+            data = json.loads(content)
+        except (ValueError, FileNotFoundError):
+            content = ''
+            data = {}
+
+        yield data
+
+        try:
+            new_content = json.dumps(data, cls=SimpleJSONEncoder)
+        except Exception as ex:
+            print(data)
+            raise ex
+
+        if content != new_content:
+            f.seek(0)
+            f.truncate()
+            f.write(new_content)
+
+
+@contextlib.contextmanager
+def open_json_read_only(filename, fail_if_invalid=True):
+    try:
+        with open(filename, mode='r') as f:
+            data = ujson.load(f)
+    except (ValueError, FileNotFoundError) as ex:
+        if fail_if_invalid:
+            raise ex
+        else:
+            data = {}
+
+    yield data
+
+
+def update_json_file(filename, dict_values):
+    assert isinstance(dict_values, dict)
+    with open_locked_json(filename) as data:
+        data.update(dict_values)
+
+
+class DirectoryVersionManager(object):
+    def __init__(self, filename='run_version.json', default_key='default'):
+        assert isinstance(filename, str)
+        assert isinstance(default_key, str)
+        self._filename = filename
+        self._default_key = default_key
+        self._default_version = -1
+
+    def _version_file(self, dirname) -> str:
+        return path.join(path.realpath(path.expanduser(dirname)), self._filename)
+
+    def dir_version(self, dirname, key=None, lock=True) -> int:
+        if key is None:
+            key = self._default_key
+        assert isinstance(key, str)
+
+        version_file = self._version_file(dirname)
+
+        if not path.isfile(version_file):
+            return self._default_version
+
+        if lock:
+            with open_locked_json(version_file) as dict_data:
+                version_file_content = copy.deepcopy(dict_data)
+        else:
+            with open_json_read_only(version_file) as dict_data:
+                version_file_content = copy.deepcopy(dict_data)
+
+        if key not in version_file_content:
+            return self._default_version
+
+        version = version_file_content[key]
+
+        if not (isinstance(version, numbers.Integral) or (isinstance(version, str) and version.isdigit())):
+            log.warn('Invalid dir version found: {}'.format(version))
+            return self._default_version
+        version = int(version)
+        return version
+
+    def set_dir_version(self, dirname, version, key=None) -> int:
+        assert isinstance(version, numbers.Integral) or (isinstance(version, str) and version.isdigit()), version
+        if key is None:
+            key = self._default_key
+        assert isinstance(key, str)
+
+        version_file = self._version_file(dirname)
+
+        with open_locked_json(version_file) as data:
+            if key in data:
+                prev_version = data[key]
+                if isinstance(prev_version, str) and prev_version.isdigit():
+                    prev_version = int(prev_version)
+                elif not isinstance(prev_version, numbers.Integral):
+                    prev_version = self._default_version
+            else:
+                prev_version = self._default_version
+            if prev_version > version:
+                raise ValueError('Existing version {} is greater than {} in {}'.format(prev_version, version, version_file))
+            data.update({key: version})
+
+        return prev_version
+
+
+def ensure_dir_exists(dirname):
+    dirname = path.realpath(path.expanduser(dirname))
+    if not path.isdir(dirname):
+        os.makedirs(dirname)
+        log.info('mkdir -p {}'.format(dirname))
+
+
+def dir_child_basenames(dirpath):
+    """
+    Non recursively returns child directories and files in a directory.
+    :param dirpath: Path of the directory. Must exist.
+    :return: dirnames, filenames
+    """
+    dirpath = path.expanduser(dirpath)
+    assert path.isdir(dirpath), '{} does not exist.'.format(dirpath)
+    for _, dirnames, filenames in os.walk(dirpath):
+        return dirnames, filenames
+    raise AssertionError('This should not happen.')
+
+
+def is_dir_empty(dirpath):
+    dirnames, filenames = dir_child_basenames(dirpath)
+    return len(dirnames) == 0 and len(filenames) == 0

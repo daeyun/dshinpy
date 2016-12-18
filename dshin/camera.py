@@ -82,7 +82,7 @@ class OrthographicCamera(Camera):
         return xy, valid_inds
 
     def cam_to_image(self, xyzs, filter_invalid=False):
-        xy = xyzs[:, :2]
+        xy = xyzs[:, :2].copy()
         xy[:, 1] *= -1
         xy[:, 0] /= self.trbl[1] - self.trbl[3]
         xy[:, 1] /= self.trbl[0] - self.trbl[2]

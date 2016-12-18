@@ -13,3 +13,6 @@ pytest
 pytest-timeout
 sphinx
 ipython
+ujson
+paramiko
+libtmux

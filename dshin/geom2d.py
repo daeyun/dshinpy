@@ -36,8 +36,7 @@ def pts(xy, ax=None, markersize=10, color='r'):
 
 
 def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax=None,
-               clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True):
-
+               clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True, show_colorbar=True, colorbar_size='3%', simple_ticks=True):
     in_order = in_order.lower()
     if in_order != 'hw':
         depth = montage(depth, in_order=in_order, gridwidth=grid_width)
@@ -57,7 +56,9 @@ def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax
         tic.tick1On = tic.tick2On = False
         tic.label1On = tic.label2On = False
 
-    if grid is not None:
+    if grid is None:
+        pt.grid(False)
+    else:
         ax.xaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
         ax.yaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
 
@@ -65,10 +66,28 @@ def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="3%", pad=0.05)
+    cax = divider.append_axes("right", size=colorbar_size, pad=0.05)
     # cb = ax.figure.colorbar(ii)
-    cb = pt.colorbar(ii, cax=cax)
+    cb = pt.colorbar(ii, cax=cax, format='%.2g')
     cb.ax.tick_params(labelsize=8)
+
+    if simple_ticks:
+        mask = ~np.isnan(depth)
+        values = depth[mask]
+        tick_min = values.min()
+        tick_max = values.max()
+
+        if np.isclose(tick_min, 0):
+            tick_min = 0.0
+        if np.isclose(tick_max, 0):
+            tick_max = 0.0
+
+        if tick_min < 0 and tick_max > 0:
+            tick_values = [tick_min, 0, tick_max]
+        else:
+            tick_values = [tick_min, tick_max]
+
+        cb.set_ticks(tick_values)
 
     if not show_colorbar_ticks:
         for label in cb.ax.xaxis.get_ticklabels():
@@ -79,6 +98,10 @@ def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax
     if clim is not None:
         # fig.clim(clim[0 ], clim[-1])
         cb.set_clim(clim)
+
+    if not show_colorbar:
+        cax.set_visible(False)
+
     return ax
 
 

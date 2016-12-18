@@ -42,11 +42,11 @@ def job_info_from_server_def(server_def):
 
 
 class TFProcess(mp.Process, metaclass=abc.ABCMeta):
-    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, logdir, experiment_name=None, batch_size=None, session_config=None, gpu_ids=None):
+    def __init__(self, cluster_spec, job_name, task_id, nnmodel_class, logdir, experiment_name=None, batch_size=None, session_config=None, gpu_ids=None, checkpoint_file=None):
         super().__init__()
         self.daemon = True
 
-        assert job_name in ('ps', 'worker', 'data')
+        assert job_name in ('ps', 'worker', 'data', 'local')
 
         assert isinstance(cluster_spec, tf.train.ClusterSpec)
         assert isinstance(gpu_ids, (tuple, list))
@@ -59,6 +59,7 @@ class TFProcess(mp.Process, metaclass=abc.ABCMeta):
         self._batch_size = batch_size
         self._logdir = logdir
         self._experiment_name = experiment_name
+        self._checkpoint_file = checkpoint_file
 
         self._session_config = session_config
         self._thread = threading.Thread(target=self._thread_main, daemon=True)

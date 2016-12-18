@@ -1,11 +1,10 @@
 import math
+
 import numpy
-# import skimage
 import numpy as np
 import scipy.linalg as la
 import scipy.ndimage as spndim
-from dshin import stats
-from dshin import camera
+
 from dshin import log
 
 
@@ -432,7 +431,7 @@ def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
     valid_inds = np.logical_not(np.isnan(impts[:, 2]))
     impts = impts[valid_inds, :].astype(np.float64)
 
-    top, right, bottom, left = [1, 1, -1, -1]
+    top, right, bottom, left = trbl
 
     impts[:, 0] *= (right - left) / im_wh[0]
     impts[:, 1] *= -(top - bottom) / im_wh[1]
@@ -441,8 +440,6 @@ def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
     impts[:, 2] *= -1
 
     return impts
-
-    # impts3d = apply_Rt(Rt, impts, inverse=True)
 
 
 def quaternion_matrix(quaternion):
@@ -488,13 +485,31 @@ def xyz_to_sph(xyz):
     return np.hstack((r, inclination, azimuth)).reshape(xyz.shape)
 
 
-def sph_to_xyz(sph):
+def sph_to_xyz(sph, is_input_radians=True):
+    """
+    Spherical coordinates in radians to xyz coordinates.
+    (radius, inclination, azimuth)
+    """
+    if isinstance(sph, (tuple, list)):
+        sph = np.array(sph, dtype=np.float64).copy()
+    input_dim = sph.ndim
+    if input_dim == 1:
+        sph = sph.reshape(1, 3).copy()
+
+    if not is_input_radians:
+        sph = sph.copy()
+        rad = np.deg2rad(sph[:, 1:])
+        sph[:, 1:] = rad
+
     r, inclination, azimuth = sph[:, 0], sph[:, 1], sph[:, 2]
     x = r * np.sin(inclination) * np.cos(azimuth)
     y = r * np.sin(inclination) * np.sin(azimuth)
     z = r * np.cos(inclination)
     xyz = np.stack((x, y, z), axis=1)
     assert xyz.shape == sph.shape
+
+    if input_dim == 1:
+        return xyz.reshape(3).copy()
     return xyz
 
 
@@ -701,3 +716,160 @@ def find_similarity_transform(source_points, target_points):
     M = np.hstack([scale * R, t[:, None]])
 
     return R, scale, t, M
+
+
+def normals_from_ortho_depth(depth, trbl=(1, 1, -1, -1), is_inward=False):
+    assert depth.ndim == 2
+    im_hw = depth.shape
+    cam_h = trbl[0] - trbl[2]
+    cam_w = trbl[1] - trbl[3]
+    dy, dx = np.gradient(depth, cam_h / im_hw[0], cam_w / im_hw[1])
+    dxyz = np.stack([-dx, dy, -np.ones_like(dx)], axis=2)
+    norm = la.norm(dxyz, ord=2, axis=2, keepdims=True)
+    dxyz /= norm
+    if not is_inward:
+        dxyz = -dxyz
+    return dxyz
+
+
+def oriented_pcl_from_ortho_depth(depth, mask, inward_normals=False, trbl=(1, 1, -1, -1)):
+    assert depth.shape == mask.shape
+    assert mask.ndim == 2
+    pts_im = cam_pts_from_ortho_depth(depth=depth, trbl=trbl)
+    pts = pts_im[mask.ravel()]
+    normals_im = normals_from_ortho_depth(depth, trbl=trbl, is_inward=inward_normals)
+    normals = normals_im[mask]
+    assert pts.shape == normals.shape
+    return pts, normals
+
+
+def patch_radius_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
+    im_hw = depth.shape
+    cam_h = trbl[0] - trbl[2]
+    cam_w = trbl[1] - trbl[3]
+    dy, dx = np.gradient(depth)
+    im_dy = cam_h / im_hw[0]
+    im_dx = cam_w / im_hw[1]
+
+    y_r = np.sqrt(np.square(dy) + np.square(im_dy))
+    x_r = np.sqrt(np.square(dx) + np.square(im_dx))
+    r = np.sqrt(np.square(x_r) + np.square(y_r))
+    return r
+
+
+def pad_image(im, pad, fill_value):
+    pad_width = [(pad, pad), (pad, pad)]
+    if im.ndim > 2:
+        pad_width.append((0, 0))
+    ret = np.pad(im, pad_width=pad_width, mode='constant', constant_values=fill_value)
+    return ret
+
+
+def visible_border_for_cropping(im, square=True, mask=None, padding=0, minimum_wh=None, background_value=0.0):
+    # TODO(daeyun): check any off-by-one error.
+
+    if square:
+        assert minimum_wh[0] == minimum_wh[1]
+
+    if mask is None:
+        if np.isnan(background_value):
+            mask = ~np.isnan(mask)
+        else:
+            mask = im != background_value
+        if mask.ndim > 2:
+            mask = np.any(mask, axis=2)
+        assert np.any(mask)
+    assert mask.ndim == 2
+
+    _, x = np.where(np.any(mask, axis=0, keepdims=True))
+    y, _ = np.where(np.any(mask, axis=1, keepdims=True))
+
+    top, bottom = y.min(), y.max()
+    left, right = x.min(), x.max()
+
+    if square:
+        vr = ((bottom - top) / 2.0)
+        hr = ((right - left) / 2.0)
+        if vr > hr:
+            mid = np.ceil((right + left) / 2.0)
+            left = mid - vr
+            right = mid + vr
+        if vr < hr:
+            mid = np.ceil((bottom + top) / 2.0)
+            top = mid - hr
+            bottom = mid + hr
+
+    if minimum_wh is not None:
+        w = right - left + 1
+        if w + 2 * padding < minimum_wh[0]:
+            before = np.floor(minimum_wh[0] - (w + 2 * padding)) / 2.0
+            after = np.ceil(minimum_wh[0] - (w + 2 * padding)) / 2.0
+            left -= before
+            right += after
+
+        h = bottom - top + 1
+        if w + 2 * padding < minimum_wh[1]:
+            before = np.floor(minimum_wh[1] - (h + 2 * padding)) / 2.0
+            after = np.ceil(minimum_wh[1] - (h + 2 * padding)) / 2.0
+            top -= before
+            bottom += after
+
+    top, bottom, left, right = int(top), int(bottom), int(left), int(right)
+    assert right - left == bottom - top
+
+    return top, bottom, left, right
+
+
+def crop_visible(im, square=True, mask=None, padding=0, minimum_wh=None, white_background=False):
+    """
+    If `im` is a list of images, crop based on the parameters of the first image.
+    """
+    return_list = False
+    if isinstance(im, (list, tuple)):
+        return_list = True
+        images = im
+        im = images[0]
+    else:
+        images = [im]
+
+    if white_background:
+        if np.issubdtype(im.dtype, np.float):
+            background_value = 1.0
+        elif np.issubdtype(im.dtype, np.uint8):
+            background_value = 255
+    else:
+        if np.issubdtype(im.dtype, np.float):
+            background_value = 0.0
+        elif np.issubdtype(im.dtype, np.uint8):
+            background_value = 0
+
+    for image_i in images:
+        assert image_i.shape == im.shape, image_i.shape
+
+    top, bottom, left, right = visible_border_for_cropping(im=im, square=square, mask=mask, padding=padding, minimum_wh=minimum_wh, background_value=background_value)
+
+    wh = im.shape[:2][::-1]
+
+    if top < 0 or left < 0 or right >= wh[0] or right >= wh[1]:
+        raise NotImplementedError('Cropping outside image coordinates: {}, {}, {}, {}'.format(top, bottom, left, right))
+
+    if padding != 0:
+        top -= padding
+        bottom += padding
+        left -= padding
+        right += padding
+
+    ret = [image_i[top:bottom + 1, left:right + 1].copy() for image_i in images]
+
+    if square:
+        for ret_i in ret:
+            assert ret_i.shape[0] == ret_i.shape[1], ret_i.shape
+
+    if minimum_wh is not None:
+        for ret_i in ret:
+            assert ret_i.shape[0] >= minimum_wh[1] and ret_i.shape[1] >= minimum_wh[0]
+
+    if not return_list:
+        assert len(ret) == 1
+        return ret[0]
+    return ret

@@ -3,15 +3,14 @@ Helpers for querying and loading data.
 """
 
 import concurrent.futures
+import math
 import multiprocessing as mp
-import typing
 import signal
+import time
+import typing
 from os import path
 
 import ensure
-import math
-import time
-import abc
 import numpy as np
 import peewee
 

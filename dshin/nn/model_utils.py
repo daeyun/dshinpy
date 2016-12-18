@@ -510,7 +510,8 @@ class NNModel(metaclass=abc.ABCMeta):
               seed=None,
               sync_replicas=True,
               save_model_secs=600,
-              from_model_checkpoint=None):
+              from_model_checkpoint=None,
+              start_standard_services=None):
         if server is None:
             self.info('`tf.train.Server` was not provided. Creating a local server.')
             server = tf.train.Server.create_local_server()
@@ -738,7 +739,9 @@ class NNModel(metaclass=abc.ABCMeta):
                                                   )
 
         self.info('Waiting for session.')
-        sess = self.prepare_or_wait_for_session(start_standard_services=self.is_chief)
+        if start_standard_services is None:
+            start_standard_services = self.is_chief
+        sess = self.prepare_or_wait_for_session(start_standard_services=start_standard_services)
         assert isinstance(sess, tf.Session)
         self.session = sess
         self.info('Session is ready.')
@@ -1632,8 +1635,12 @@ class NNModel(metaclass=abc.ABCMeta):
             current_queue_size = self.current_queue_size()
             b = max(min(batch_size, current_queue_size), 1)
 
+            # TODO(daeyun)
+            b = 60
+
             try:
                 out = self.eval(tensor_names, feed_dict={'batch_size': b, }, is_training=False, summary_keys=keys, summary_writer_name=source)
+                print(num_batches, out, b)
             except (tf.errors.OutOfRangeError, tf.errors.NotFoundError, BlockingIOError) as ex:
                 is_out_of_range = True
             except Exception as ex:
@@ -1657,6 +1664,7 @@ class NNModel(metaclass=abc.ABCMeta):
             results = {k: None for k, v in results.items()}
         elif num_batches > 0:
             results = {k: (v / num_examples_trained) for k, v in results.items()}
+        print(results)
 
         ret = {}
         for k, mean_value in results.items():
