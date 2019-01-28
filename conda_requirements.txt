@@ -15,4 +15,3 @@ sphinx
 ipython
 ujson
 paramiko
-libtmux

@@ -10,6 +10,7 @@ import tensorflow as tf
 import typecheck as tc
 
 from dshin.nn import types as nn_types
+from dshin import log
 from dshin.third_party import gflags
 from tensorflow.contrib import slim
 from tensorflow.contrib.slim.nets import resnet_v2
@@ -26,8 +27,7 @@ def layer(func):
     return wrapper
 
 
-@tc.typecheck
-def _get_model_variable(name: str, shape: tc.seq_of(int), initializer: callable, trainable: bool = True) -> tf.Variable:
+def _get_model_variable(name: str, shape, initializer: callable, trainable: bool = True) -> tf.Variable:
     # with tf.device('/cpu:0'):
     # dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
     dtype = tf.float32
@@ -208,7 +208,6 @@ def linear(input_tensor: tf.Tensor,
 
 
 @layer
-@tc.typecheck
 def fixed_unpool(value: nn_types.Value, name: str = 'unpool', mode: str = 'ZERO_FILLED') -> tf.Tensor:
     """
     Upsampling operation.
@@ -239,7 +238,6 @@ def fixed_unpool(value: nn_types.Value, name: str = 'unpool', mode: str = 'ZERO_
 
 
 @layer
-@tc.typecheck
 def fixed_pool(value: nn_types.Value, name: str = 'pool') -> nn_types.Value:
     """
     Downsampling operation.
@@ -269,12 +267,12 @@ def lrelu(input_tensor: nn_types.Value, alpha: float = 0.05, name: str = 'lrelu'
     return tflearn.leaky_relu(input_tensor, alpha=alpha, name=name)
 
 
-@tc.typecheck
 def ema_with_initial_value(value: nn_types.Value,
                            initial_value: float = 0.0,
-                           ema_trainer: tc.optional(tf.train.ExponentialMovingAverage) = None,
-                           decay: tc.optional(float) = None,
+                           ema_trainer  = None,
+                           decay= None,
                            name: str = 'ema') -> nn_types.Value:
+    log.warn('DEPRECATED. Probably not up-to-date.')
     if ema_trainer is None:
         if decay is None:
             decay = 0.99
@@ -301,18 +299,18 @@ def ema_with_initial_value(value: nn_types.Value,
 
 def ema(value, decay, name='EMA'):
     # Reset variable scope.
-    with tf.variable_scope('EMA/') as scope:
+    with tf.variable_scope(tf.VariableScope(reuse=None, name='EMA')) as scope:
         # TODO(daeyun): Reuse the trainer object so that there is only one apply op per group.
-        # This currently creates a bunch of operations named `ema_#` in the root name scope. variable names are not affected.
         ema_trainer = tf.train.ExponentialMovingAverage(decay=decay, name=name)
         apply_op = ema_trainer.apply([value])
         moving_average = ema_trainer.average(value)
     tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, apply_op)
+
     return moving_average
 
 
-@tc.typecheck
 def ema_with_update_dependencies(values: nn_types.Value, initial_values: float = 0.0, decay: float = 0.99, name: str = 'ema') -> tf.Tensor:
+    log.warn('DEPRECATED. Probably not up-to-date.')
     with tf.variable_scope(name):
         ema_trainer = tf.train.ExponentialMovingAverage(decay=decay)
         assign_ops = []
@@ -349,9 +347,8 @@ def ema_with_update_dependencies(values: nn_types.Value, initial_values: float =
 
 
 @layer
-@tc.typecheck
 def batch_norm(value: nn_types.Value,
-               is_local: tc.any(tf.Tensor, bool) = True,
+               is_local = True,
                name: str = 'bn',
                offset: float = 0.0,
                scale: float = 1.0,
@@ -413,7 +410,6 @@ def batch_norm(value: nn_types.Value,
     return bn
 
 
-@tc.typecheck
 def flatten(value: nn_types.Value, name: str = 'flatten') -> tf.Tensor:
     """
     Flattens the input tensor's shape to be linear.
@@ -427,10 +423,9 @@ def flatten(value: nn_types.Value, name: str = 'flatten') -> tf.Tensor:
         return tf.reshape(value, [-1, num_linear], name=scope)
 
 
-@tc.typecheck
 def conv_reshape(value: nn_types.Value,
                  k: int,
-                 num_channels: tc.optional(int) = None,
+                 num_channels= None,
                  name: str = 'conv_reshape',
                  dims: int = 2) -> tf.Tensor:
     assert 2 <= dims <= 3
@@ -450,7 +445,6 @@ def conv_reshape(value: nn_types.Value,
     return tf.reshape(value, out_shape, name=name)
 
 
-@tc.typecheck
 def stack_batch_dim(value_list: nn_types.Values,
                     name: str = 'batch_stack') -> tf.Tensor:
     """
@@ -470,7 +464,6 @@ def stack_batch_dim(value_list: nn_types.Values,
     return out
 
 
-@tc.typecheck
 def apply_concat(value_list: nn_types.Values, factory: callable, name_prefix: str = 'branch') -> tf.Tensor:
     """
     Concatenates Tensors in the channel dimension.
@@ -637,7 +630,6 @@ def residual_unit2(inputs: tf.Tensor,
     return add
 
 
-@tc.typecheck
 def trainable_variable_norms(name: str = 'weight_norms') -> dict:
     """
     Returns a dict that maps trainable variable names to l2 norm Tensors.
@@ -658,10 +650,9 @@ def trainable_variable_norms(name: str = 'weight_norms') -> dict:
     return all_var_norms
 
 
-@tc.typecheck
 def layer_summary(value: nn_types.Value,
-                  tag_suffix: tc.optional(str) = None,
-                  collections: tc.optional(tc.seq_of(str)) = None):
+                  tag_suffix= None,
+                  collections= None):
     default_collections = [tf.GraphKeys.SUMMARIES]
 
     if collections is not None:
@@ -678,7 +669,6 @@ def layer_summary(value: nn_types.Value,
     # tf.scalar_summary(tags=value.name + '_stddev', values=stddev, collections=default_collections)
 
 
-@tc.typecheck
 def weight_layer(x: nn_types.Value,
                  name: str,
                  ch: int,
@@ -689,12 +679,12 @@ def weight_layer(x: nn_types.Value,
                      'deconv3d',
                      'linear'
                  ),
-                 is_training: tc.any(tf.Tensor, bool) = False,
+                 is_training= False,
                  k=4,
                  s=2,
                  bn=True,
                  use_bias=None,
-                 relu: tc.optional(callable) = lrelu):
+                 relu= lrelu):
     out = x
     assert out.get_shape().ndims >= 2
 

@@ -41,14 +41,16 @@ def edge_3d(lines, ax=None, colors=None, lim=None, linewidths=2):
 
 
 def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, cam_sph=None, colorbar=False, cmap=None,
-        is_radians=False):
+        is_radians=False, zdir='z', show_labels=True, hide_ticks=False):
     if ax is None:
         fig = pt.figure()
         # ax = fig.add_subplot(111, projection='3d')
         ax = fig.gca(projection='3d')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
+    if show_labels:
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+
     ax.set_aspect('equal')
     if cam_sph is not None:
         if is_radians:
@@ -62,7 +64,7 @@ def pts(pts, ax=None, color='blue', markersize=5, lim=None, reset_limits=True, c
         lim = np.array(lim)
 
     p = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], marker='.', linewidth=0,
-                   c=color, s=markersize, cmap=cmap)
+                   c=color, s=markersize, cmap=cmap, zdir=zdir, depthshade=True)
     if colorbar:
         pt.gcf().colorbar(p)
 
@@ -203,6 +205,11 @@ def draw_camera(Rt, ax=None, scale=10):
 
     arrow_start = np.tile(cam_xyz, [3, 1])
     arrow_end = -(scale * R) + cam_xyz
+
+    # # TODO: delete this after cs211 deadline.
+    # if (arrow_end - arrow_start)[1,2] > 0:
+    #     arrow_end[:2] = arrow_start[:2] - (arrow_end[:2] - arrow_start[:2])
+    # #-------
 
     draw_arrow_3d(arrow_start, arrow_end, ax, colors=['red', 'blue', 'green'],
                   texts=['x', 'y', 'z'])

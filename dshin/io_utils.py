@@ -1,5 +1,4 @@
 import contextlib
-import ujson
 import copy
 import errno
 import fcntl
@@ -10,11 +9,15 @@ import os
 import sys
 import tempfile
 import time
+import struct
+import pymesh
 from os import path
 
 import numpy as np
 import plyfile
 import stl
+import ujson
+import blosc
 
 from dshin import log
 
@@ -101,9 +104,7 @@ def save_stl(mesh, filename):
     faces = mesh['f']
     verts = mesh['v']
     stl_mesh = stl.mesh.Mesh(np.zeros(faces.shape[0], dtype=stl.mesh.Mesh.dtype))
-    for i, f in enumerate(faces):
-        for j in range(3):
-            stl_mesh.vectors[i][j] = verts[f[j], :]
+    stl_mesh.vectors[:] = verts[faces]
     stl_mesh.save(filename)
 
 
@@ -121,10 +122,12 @@ def read_ply(filename):
     else:
         f = np.array([]).reshape([0, 3])
 
-    return {
+    ret = {
         'v': v,
         'f': f,
     }
+
+    return ret
 
 
 def read_ply_pcl(filename):
@@ -133,12 +136,15 @@ def read_ply_pcl(filename):
     normals = np.vstack((plydata['vertex']['nx'], plydata['vertex']['ny'], plydata['vertex']['nz'])).T
     values = plydata['vertex']['value'].T
     confidence = plydata['vertex']['confidence'].T
-    return {
+    ret = {
         'v': v,
         'confidence': confidence,
         'normals': normals,
         'value': values,
     }
+    if 'face' in plydata:
+        ret['f'] = plyfile.make2d(plydata['face'].data['vertex_indices'])
+    return ret
 
 
 def save_off(mesh, filename):
@@ -185,6 +191,7 @@ def sha256(objs):
     return h.hexdigest()
 
 
+# TODO: make sure -0 and 0 are treated the same.
 def stringify_float_arrays(arr_list, precision=6):
     assert isinstance(arr_list, list), isinstance(arr_list, tuple)
     arr = np.hstack(arr_list).ravel().astype(np.float32)
@@ -218,7 +225,8 @@ def save_points_ply(out_filename, points, normals, values, confidence, text=Fals
     if scale_normals_by_confidence:
         normals = normals.copy() * confidence
     xyz_nxyz = np.concatenate([points, normals, values, confidence], axis=1)
-    vertex = np.core.records.fromarrays(xyz_nxyz.T, names='x, y, z, nx, ny, nz, value, confidence', formats='f4, f4, f4, f4, f4, f4, f4, f4')
+    vertex = np.core.records.fromarrays(xyz_nxyz.T, names='x, y, z, nx, ny, nz, value, confidence',
+                                        formats='f4, f4, f4, f4, f4, f4, f4, f4')
 
     el = plyfile.PlyElement.describe(vertex, 'vertex')
     ply = plyfile.PlyData([el], text=text)
@@ -266,7 +274,8 @@ def open_locked(filename, mode='r+', sleep_seconds=0.2, verbose=True, **kwargs):
                     else:
                         time.sleep(sleep_seconds)
                         if verbose and i > 0 and i % 10 == 0:
-                            log.warning('Waiting for a locked file {}. Elapsed: {:.3g} seconds.'.format(filename, time.time() - start_time))
+                            log.warning('Waiting for a locked file {}. Elapsed: {:.3g} seconds.'.format(filename,
+                                                                                                        time.time() - start_time))
                         i += 1
             yield fd
 
@@ -391,7 +400,8 @@ class DirectoryVersionManager(object):
             else:
                 prev_version = self._default_version
             if prev_version > version:
-                raise ValueError('Existing version {} is greater than {} in {}'.format(prev_version, version, version_file))
+                raise ValueError(
+                    'Existing version {} is greater than {} in {}'.format(prev_version, version, version_file))
             data.update({key: version})
 
         return prev_version
@@ -400,8 +410,17 @@ class DirectoryVersionManager(object):
 def ensure_dir_exists(dirname):
     dirname = path.realpath(path.expanduser(dirname))
     if not path.isdir(dirname):
-        os.makedirs(dirname)
+        # `exist_ok` in case of race condition.
+        os.makedirs(dirname, exist_ok=True)
         log.info('mkdir -p {}'.format(dirname))
+
+
+def make_symlink_overwrite(source, target):
+    assert os.path.exists(source)
+    if os.path.islink(target):
+        os.remove(target)
+    os.symlink(source, target)
+    log.info('ln -s {} {}'.format(source, target))
 
 
 def dir_child_basenames(dirpath):
@@ -420,3 +439,40 @@ def dir_child_basenames(dirpath):
 def is_dir_empty(dirpath):
     dirnames, filenames = dir_child_basenames(dirpath)
     return len(dirnames) == 0 and len(filenames) == 0
+
+
+def bytes_to_float32_array(s: bytes):
+    dims = struct.unpack('i', s[:4])[0]
+    assert 0 <= dims < 1000
+    shape = struct.unpack('i' * dims, s[4:4 * dims + 4])
+    for dim in shape:
+        assert dim > 0
+    ret = np.frombuffer(s[4 * dims + 4:], dtype=np.float32)
+    assert ret.size == np.prod(shape), (ret.size, shape)
+    ret.shape = shape
+    return ret.copy()
+
+
+def read_float32_array(filename):
+    """
+    Reads a binary file with the following format:
+    [int32_t number of dimensions n]
+    [int32_t dimension 0], [int32_t dimension 1], ..., [int32_t dimension n]
+    [float data]
+
+    :param filename: 
+    :return:
+    """
+    with open(filename, mode='rb') as f:
+        content = f.read()
+    return bytes_to_float32_array(content)
+
+
+def read_float32_array_compressed(filename):
+    """
+    Reads a binary file compressed with Blosc. Otherwise the same as read_float32_array.
+    """
+    with open(filename, mode='rb') as f:
+        compressed = f.read()
+    decompressed = blosc.decompress(compressed)
+    return bytes_to_float32_array(decompressed)

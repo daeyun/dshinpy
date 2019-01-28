@@ -4,8 +4,8 @@ from dshin import plot_utils
 from dshin import camera
 
 __all__ = [
-    'app'
-    'os_utils'
-    'plot_utils'
+    'app',
+    'os_utils',
+    'plot_utils',
     'camera'
 ]

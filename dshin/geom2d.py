@@ -36,13 +36,20 @@ def pts(xy, ax=None, markersize=10, color='r'):
 
 
 def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax=None,
-               clim=None, nancolor='y', cmap='gray', grid=64, show_colorbar_ticks=True, show_colorbar=True, colorbar_size='3%', simple_ticks=True):
+               clim=None, nan_color='y', cmap='gray', grid=64, show_colorbar_ticks=True, show_colorbar=True, colorbar_size='3%', simple_ticks=True,
+               nan_alpha=None, alpha=None):
+    if np.any(np.array(depth.shape) <= 1):
+        depth = depth.squeeze()
+
     in_order = in_order.lower()
+    if (np.array(depth.shape) > 1).sum() == 3:
+        in_order = 'chw'
+
     if in_order != 'hw':
         depth = montage(depth, in_order=in_order, gridwidth=grid_width)
 
     g = cm.get_cmap(cmap, 1024 * 2)
-    g.set_bad(nancolor, 1.)
+    g.set_bad(nan_color, alpha=nan_alpha)
 
     if ax is None:
         fig = pt.figure()
@@ -62,7 +69,7 @@ def draw_depth(depth: np.ma.core.MaskedArray, in_order='hw', grid_width=None, ax
         ax.xaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
         ax.yaxis.set_major_locator(pt_ticker.MultipleLocator(base=grid))
 
-    ii = ax.imshow(depth, cmap=g, interpolation='nearest', aspect='equal')
+    ii = ax.imshow(depth, cmap=g, interpolation='nearest', aspect='equal', alpha=alpha)
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     divider = make_axes_locatable(ax)

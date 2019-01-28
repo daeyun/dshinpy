@@ -10,7 +10,7 @@ import time
 import typing
 from os import path
 
-import ensure
+# import ensure
 import numpy as np
 import peewee
 
@@ -37,7 +37,7 @@ def _init_worker():
 
 
 class AsyncArrayLoader(object):
-    @ensure.ensure_annotations
+    # @ensure.ensure_annotations
     def __init__(self, pool_size=16, loader_func: typing.Callable = _load_npz):
         """
         Loads arrays from files concurrently and returns a concatenated array.
@@ -58,7 +58,7 @@ class AsyncArrayLoader(object):
         self._process_pool.terminate()
         self._executor.shutdown(wait=False)
 
-    @ensure.ensure_annotations
+    # @ensure.ensure_annotations
     def join_arrays(self, filenames: typing.Sequence[str]) -> np.ndarray:
         """
         Uses a process pool to load arrays and concatenates them in the first dimension.
@@ -71,7 +71,7 @@ class AsyncArrayLoader(object):
         assert out.flags['C_CONTIGUOUS']
         return out
 
-    @ensure.ensure_annotations
+    # @ensure.ensure_annotations
     def join_arrays_async(self, filenames: typing.Sequence[str]) -> concurrent.futures.Future:
         """
         Executes `join_arrays` in a thread pool and returns a Future.
@@ -95,7 +95,7 @@ class QueryPaginator(object):
         self.count = query.count()
         self.current_row = 0
         self.current_iteration = 0
-        ensure.check(True)
+        # ensure.check(True)
 
     def _reset_iteration(self):
         """
@@ -109,7 +109,7 @@ class QueryPaginator(object):
         self.current_iteration += 1
         self.current_row = 0
 
-    @ensure.ensure_annotations
+    # @ensure.ensure_annotations
     def next(self, max_items: int) -> typing.List[typing.Union[dict, peewee.Model]]:
         """
         Returns a list of next n items. An empty list is returned after each iteration;
@@ -129,7 +129,7 @@ class QueryPaginator(object):
 
 
 class DataSource(object):
-    def __init__(self, query_dict, is_seamless=True):
+    def __init__(self, query_dict, is_seamless=True, pool_size=2):
         """
         Manages multiple `QueryPaginator` instances and supports continuous batching.
 
@@ -140,6 +140,11 @@ class DataSource(object):
         self.query = query_dict
         self._paginator = self._assign_paginators_recursive(self.query)
         self._is_seamless = is_seamless
+
+        self._executor = concurrent.futures.ThreadPoolExecutor(pool_size)
+
+    def __del__(self):
+        self._executor.shutdown(wait=False)
 
     def _assign_paginators_recursive(self, query):
         if not isinstance(query, dict):
@@ -262,14 +267,14 @@ class DataSource(object):
 
         # Merge rows into a batch.
         keys = []
-        batch = []
-        for row in rows:
-            row_dict = self._post_process(row)
+        batch = [item for item in self._executor.map(self._post_process, rows)]
+
+        # Sanity check.
+        for row_dict in batch:
             if not keys:
                 keys = list(row_dict.keys())
             else:
                 assert keys == list(row_dict.keys()), 'Inconsistent keys: {}'.format(list(row_dict.keys()))
-            batch.append(row_dict)
 
         out = {}
         for key in keys:

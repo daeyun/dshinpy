@@ -1,7 +1,19 @@
 import time
 import collections
 import contextlib
+import ntplib
 from dshin import log
+
+
+def ntp_timestamp() -> float:
+    """
+    Returns seconds since the epoch independent of the system time.
+    Takes around 30~200ms. Should not be called too frequently.
+    :return: A timestamp from the NTP server.
+    """
+    call = ntplib.NTPClient()
+    response = call.request('pool.ntp.org', version=3)
+    return response.tx_time
 
 
 class OpsPerSecond:

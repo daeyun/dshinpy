@@ -3,9 +3,11 @@ numpy >= 1.10.2
 scipy >= 0.16.1
 ensure >= 0.6.2
 toposort >= 1.4
-
 typing
 peewee
 typecheck-decorator
-
-https://ci.tensorflow.org/view/Nightly/job/nightly-matrix-cpu/TF_BUILD_IS_OPT=OPT,TF_BUILD_IS_PIP=PIP,TF_BUILD_PYTHON_VERSION=PYTHON3,label=cpu-slave/lastSuccessfulBuild/artifact/pip_test/whl/tensorflow-0.10.0rc0-cp34-cp34m-linux_x86_64.whl
+libtmux
+ntplib
+plyfile
+numpy-stl
+pymesh

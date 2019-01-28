@@ -11,8 +11,8 @@ from os import path
 
 import tensorflow as tf
 import toposort
-import typecheck as tc
 import typing
+import typecheck as tc
 
 from dshin import log
 from dshin.nn import graph_utils
@@ -39,8 +39,7 @@ class QueueComponents(object):
         self.queue = queue
 
 
-@tc.typecheck
-def sort_tensors(ops: nn_types.Operations) -> tc.seq_of(str):
+def sort_tensors(ops: nn_types.Operations):
     """
     Sorts the inputs and outputs of TensorFlow Operations in topological order.
 
@@ -66,11 +65,10 @@ def sort_tensors(ops: nn_types.Operations) -> tc.seq_of(str):
     return out
 
 
-@tc.typecheck
 def match_names(values: nn_types.ValuesOrOperations,
-                pattern: tc.optional(str) = None,
-                prefix: tc.optional(str) = None,
-                suffix: tc.optional(str) = None,
+                pattern= None,
+                prefix= None,
+                suffix= None,
                 return_final_pattern=False):
     """
     Filters TensorFlow g objects by regular expression.
@@ -153,7 +151,6 @@ def check_feed_queue_coverage(feed_dict):
                           'Given:\n{}\n\nMissing:\n{}').format(input_names, missing_names))
 
 
-@tc.typecheck
 def default_sess_config(mem: float = 0.98,
                         log_device_placement: bool = False,
                         device_filters=None) -> tf.ConfigProto:
@@ -204,8 +201,7 @@ class NNModel(metaclass=abc.ABCMeta):
     }
 
     @classmethod
-    @tc.typecheck
-    def from_file(cls, restore_path: str, summary_dir: tc.optional(str) = None):
+    def from_file(cls, restore_path: str, summary_dir= None):
         """
         A factory method that returns an instance of a previously saved model.
 
@@ -218,8 +214,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return net
 
     @staticmethod
-    @tc.typecheck
-    def summary_keys(modes: tc.any(tc.seq_of(str), str) = ('SIMPLE',)) -> tc.seq_of(str):
+    def summary_keys(modes = ('SIMPLE',)):
         """
         Returns a list of Graph collection keys.
 
@@ -237,12 +232,11 @@ class NNModel(metaclass=abc.ABCMeta):
 
         return sorted(list(set(keys)))
 
-    @tc.typecheck
     def __init__(self,
-                 sess: tc.optional(tc.any(tf.Session, tf.InteractiveSession)) = None,
-                 seed: tc.optional(int) = None,
+                 sess= None,
+                 seed= None,
                  build: bool = True,
-                 summary_dir: tc.optional(str) = None,
+                 summary_dir= None,
                  input_queue_device=None):
         """
         Creates a new model instance.
@@ -317,8 +311,7 @@ class NNModel(metaclass=abc.ABCMeta):
             # Graph is only added to 'train' summary file.
             self._summary_writers['train'] = self._summary_writer('train', graph=self.session.graph)
 
-    @tc.typecheck
-    def _summary_writer(self, name: str = 'eval', graph: tc.optional(tf.Graph) = None) -> tf.train.SummaryWriter:
+    def _summary_writer(self, name: str = 'eval', graph= None) -> tf.summary.FileWriter:
         """
         Creates or gets a summary writer.
 
@@ -333,11 +326,10 @@ class NNModel(metaclass=abc.ABCMeta):
         if name not in self._summary_writers:
             summary_writer_path = path.join(self.summary_dir, name)
             log.info('Creating summary writer %s at %s', name, summary_writer_path)
-            self._summary_writers[name] = tf.train.SummaryWriter(summary_writer_path, graph=graph)
+            self._summary_writers[name] = tf.summary.FileWriter(summary_writer_path, graph=graph)
         return self._summary_writers[name]
 
-    @tc.typecheck
-    def summary_ops(self, modes: tc.seq_of(str) = ('SIMPLE',)) -> tc.seq_of(tf.Tensor):
+    def summary_ops(self, modes= ('SIMPLE',)):
         """
         Returns a list of summary Tensors.
 
@@ -357,11 +349,10 @@ class NNModel(metaclass=abc.ABCMeta):
 
         return list(set(summaries))
 
-    @tc.typecheck
     def _build_producer_queue(self,
-                              placeholder_specs: tc.seq_of(QueuePlaceholder),
+                              placeholder_specs,
                               queue_name: str,
-                              queue_device: tc.any(str, typing.Callable)):
+                              queue_device):
         """
         Builds an input queue that atomically operates on the set of values specified by `QueuePlaceholder` objects.
         In order to use this as a global queue in a distributed model, all workers should use the same `queue_device`,
@@ -616,8 +607,7 @@ class NNModel(metaclass=abc.ABCMeta):
             raise ValueError('Invalid tensor name: {}'.format(tensor.name))
         return m.group(1)
 
-    @tc.typecheck
-    def default_placeholders(self) -> tc.seq_of(tf.Tensor):
+    def default_placeholders(self):
         """
         Default placeholders required for all models. They can be accessed
         through `get` or `__getitem__`.
@@ -682,7 +672,6 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.session.run(tf.initialize_all_variables())
                 self.needs_variable_initialization = False
 
-    @tc.typecheck
     def restore(self, restore_path: str):
         """
         Restores a previously saved model. Should be called from `NNModel.from_file`.
@@ -698,7 +687,6 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.needs_variable_initialization = False
                 self._init_summaries()
 
-    @tc.typecheck
     def save(self, save_path: str):
         """
         Saves variables to a file.
@@ -719,10 +707,9 @@ class NNModel(metaclass=abc.ABCMeta):
             save_path_out = self.saver.save(self.session, save_path, write_meta_graph=False)
             log.info("Model saved to file: %s" % save_path_out)
 
-    @tc.typecheck
     def train(self,
               feed_dict: dict,
-              summary_modes: tc.optional(tc.any(str, tc.seq_of(str))) = None,
+              summary_modes= None,
               check_queue_coverage=True):
         """
         Runs a training step.
@@ -735,7 +722,6 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         self.eval([], feed_dict=feed_dict, is_training=True, summary_modes=summary_modes)
 
-    @tc.typecheck
     def enqueue(self, feed_dict: dict):
         new_feed_dict = {}
         for k, v in feed_dict.items():
@@ -756,13 +742,12 @@ class NNModel(metaclass=abc.ABCMeta):
         assert isinstance(enqueue_op, tf.Operation)
         self.session.run(enqueue_op, feed_dict=new_feed_dict)
 
-    @tc.typecheck
     def eval(self,
-             values_or_patterns: tc.optional(tc.any(tc.any(nn_types.Value, str), tc.seq_of(tc.any(nn_types.Value, str)))) = None,
-             feed_dict: tc.optional(dict) = None,
-             collection_keys: tc.optional(tc.seq_of(str)) = None,
-             summary_modes: tc.optional(tc.seq_of(str)) = None,
-             summary_writer_name: tc.optional(str) = None,
+             values_or_patterns= None,
+             feed_dict= None,
+             collection_keys= None,
+             summary_modes= None,
+             summary_writer_name= None,
              is_training: bool = False,
              check_optional_placeholder_coverage=True):
         """
@@ -886,7 +871,6 @@ class NNModel(metaclass=abc.ABCMeta):
                     results[name] = result
             return results
 
-    @tc.typecheck
     def __getitem__(self, pattern: str) -> nn_types.ValueOrOperation:
         """
         Same as `get`. Returns a Variable or Tensor whose name uniquely matches the pattern.
@@ -896,17 +880,15 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.get(pattern)
 
     @property
-    @tc.typecheck
     def variables(self) -> nn_types.Variables:
         """
         Returns all TensorFlow Variables defined in the g.
 
         :return: All variables in the g.
         """
-        return self.graph.get_collection(tf.GraphKeys.VARIABLES)
+        return self.graph.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
 
     @property
-    @tc.typecheck
     def activations(self) -> nn_types.Tensors:
         """
         Returns layer activation tensors.
@@ -916,7 +898,6 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.graph.get_collection(tf.GraphKeys.ACTIVATIONS)
 
     @property
-    @tc.typecheck
     def ops(self) -> nn_types.Operations:
         """
         Returns all TensorFlow Operations in the g that do not have an output value.
@@ -930,7 +911,6 @@ class NNModel(metaclass=abc.ABCMeta):
         return out
 
     @property
-    @tc.typecheck
     def all_values(self) -> nn_types.ValuesOrOperations:
         """
         Returns all TensorFlow Operations or Tensors defined in the g.
@@ -953,8 +933,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return list(zip(*sorted(list(unique.items()))))[1]
 
     @memoize
-    @tc.typecheck
-    def count(self, pattern: tc.optional(str) = None) -> int:
+    def count(self, pattern= None) -> int:
         """
         Returns the numbers of values whose name matches the pattern.
 
@@ -964,7 +943,6 @@ class NNModel(metaclass=abc.ABCMeta):
         return len(match_names(self.all_values, pattern))
 
     @memoize
-    @tc.typecheck
     def collection(self, collection: str) -> nn_types.Values:
         """
         Retrieves values by a collection key.
@@ -977,8 +955,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return self.graph.get_collection(collection)
 
     @memoize
-    @tc.typecheck
-    def get_all(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None):
+    def get_all(self, pattern: str, prefix= None, suffix= None):
         """
         Returns a list of tensors or operations whose name matches the pattern. If `pattern` is not
         found, tries again with `pattern+':0$'`. Same as `self[pattern]`.
@@ -1000,8 +977,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return matched
 
     @memoize
-    @tc.typecheck
-    def get(self, pattern: str, prefix: tc.optional(str) = None, suffix: tc.optional(str) = None,
+    def get(self, pattern: str, prefix= None, suffix= None,
             save_text_summary_on_error=True) -> nn_types.ValueOrOperation:
         """
         Returns a tensor or operation whose name uniquely matches the pattern. If `pattern` is not
@@ -1061,8 +1037,7 @@ class NNModel(metaclass=abc.ABCMeta):
             final_pattern, len(matched), '\n'.join([item.name for item in matched])))
 
     @memoize
-    @tc.typecheck
-    def sorted_values(self, pattern: tc.optional(str) = None) -> nn_types.ValuesOrOperations:
+    def sorted_values(self, pattern= None) -> nn_types.ValuesOrOperations:
         """
         Topologically sorted Tensors, Operations, or Variables.
 
@@ -1075,8 +1050,7 @@ class NNModel(metaclass=abc.ABCMeta):
         return [self.get(name, prefix='^', suffix='$') for name in names]
 
     @memoize
-    @tc.typecheck
-    def last(self, pattern: tc.optional(str) = None):
+    def last(self, pattern= None):
         """
         Last item in `self.sorted_values`. Guaranteed to not have any values that depend on it.
         There may be more than one such value. Returns only one of them.
@@ -1098,8 +1072,7 @@ class NNModel(metaclass=abc.ABCMeta):
         """
         return tf.train.global_step(self.session, self['{}:0$'.format(NNModel._global_step_variable_name)])
 
-    @tc.typecheck
-    def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.train.SummaryWriter:
+    def write_simple_summary(self, tag: str, value: numbers.Real, summary_writer_name: str) -> tf.summary.FileWriter:
         """
         Writes a TensorFlow summary containing a numeric value.
 
@@ -1117,8 +1090,7 @@ class NNModel(metaclass=abc.ABCMeta):
         writer.add_summary(summary, global_step)
         return writer
 
-    @tc.typecheck
-    def image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+    def image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, collections= (), name= None) -> tf.Tensor:
         """
         A wrapper around `tf.image_summary` that prints out logs and adds to the image collection.
 
@@ -1139,8 +1111,7 @@ class NNModel(metaclass=abc.ABCMeta):
         summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collections, name=name)
         return summary_op
 
-    @tc.typecheck
-    def scalar_summary(self, tag: str, value: tf.Tensor, collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+    def scalar_summary(self, tag: str, value: tf.Tensor, collections= (), name= None) -> tf.Tensor:
         """
         A wrapper around `tf.scalar_summary` that prints out logs and adds to the `all` collection.
         """
@@ -1151,8 +1122,7 @@ class NNModel(metaclass=abc.ABCMeta):
         summary_op = tf.scalar_summary(tag, value, collections=collections, name=name)
         return summary_op
 
-    @tc.typecheck
-    def historgram_summary(self, tag: str, values: tc.any(tf.Tensor, nn_types.Tensors), collections: tc.seq_of(str) = (), name: tc.optional(str) = None) -> tf.Tensor:
+    def historgram_summary(self, tag: str, values, collections= (), name= None) -> tf.Tensor:
         """
         A wrapper around `tf.histogram_summary` that prints out logs and adds to the `all` collection.
         """
@@ -1168,8 +1138,7 @@ class NNModel(metaclass=abc.ABCMeta):
         summary_op = tf.histogram_summary(tag=tag, name=name, values=value, collections=collections)
         return summary_op
 
-    @tc.typecheck
-    def collect(self, key: str, values: tc.any(nn_types.Value, nn_types.Values)):
+    def collect(self, key: str, values):
         """
         Adds values to a g collection.
 

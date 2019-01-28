@@ -90,7 +90,7 @@ class CountingQueueRunner(object):
                 break
         self._net.info('Closing {}.'.format(self.queue.name))
         sess.run(self._close_op)
-        self._net.info('Queue runner for {} reached end of epoch (source {}).'.format(self.queue.name, self.source_name))
+        self._net.info('Queue runner for {} reached end of epoch (source {}). Item count: {}'.format(self.queue.name, self.source_name, self._count))
         # If one thread stops, others should too.
         self.request_stop()
 
@@ -352,12 +352,12 @@ class NNModel(metaclass=abc.ABCMeta):
             self._summary_tensors = {}
             for name in self._summary_keys:
                 fullname = self._summary_key_prefix + name
-                self._summary_tensors[name] = tf.merge_all_summaries(key=fullname)
+                self._summary_tensors[name] = tf.summary.merge_all(key=fullname)
 
             # Graph is only added to the 'train' summary file.
             self._summary_writers['train'] = self._summary_writer('train', graph=tf.get_default_graph())
 
-    def _summary_writer(self, name: str = 'eval', graph: tf.Graph = None) -> tf.train.SummaryWriter:
+    def _summary_writer(self, name: str = 'eval', graph: tf.Graph = None) -> tf.summary.FileWriter:
         """
         Creates or gets a summary writer.
 
@@ -369,7 +369,7 @@ class NNModel(metaclass=abc.ABCMeta):
         if name not in self._summary_writers:
             summary_writer_path = path.join(self.logdir, 'summary', name)
             self.info('Creating summary writer {} at {}'.format(name, summary_writer_path))
-            self._summary_writers[name] = tf.train.SummaryWriter(summary_writer_path, graph=graph)
+            self._summary_writers[name] = tf.summary.FileWriter(summary_writer_path, graph=graph)
         return self._summary_writers[name]
 
     @abc.abstractmethod
@@ -452,6 +452,7 @@ class NNModel(metaclass=abc.ABCMeta):
             self._build_input_pipeline('train', [100], 100)
             loss = self._model()
             assert isinstance(loss, tf.Tensor), '_model() must return a Tensor for the total loss.'
+            tf.add_to_collection('loss_to_minimize', loss)
             optimizer = self._optimizer(self.variable('learning_rate'))
 
             with tf.name_scope('optim') as scope:
@@ -463,7 +464,7 @@ class NNModel(metaclass=abc.ABCMeta):
                     minimize_op = tf.group(*update_ops, name='minimize')
 
             self.session = sess
-            sess.run(tf.initialize_all_variables())
+            sess.run(tf.global_variables_initializer())
 
             self.needs_initialization = False
 
@@ -664,7 +665,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
             # Exclude any queue-specific variables.
             vars_to_save = []
-            for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.VARIABLES]):
+            for var in self.get_collections([tf.GraphKeys.TRAINABLE_VARIABLES, tf.GraphKeys.GLOBAL_VARIABLES]):
                 for name in self.queue_names:
                     if (var.name.startswith('{}/{}/'.format(self._source_queue_prefix, name)) or
                             ('_local_step' in var.name)):
@@ -709,9 +710,9 @@ class NNModel(metaclass=abc.ABCMeta):
                 tf.assign(is_oor, True, use_locking=True, name='set_is_oor')
                 tf.assign(is_oor, False, use_locking=True, name='unset_is_oor')
 
-            vars_to_init = {tf.is_variable_initialized(v): v for v in tf.all_variables()}
-            init_op = tf.initialize_all_variables()
-            local_init_op = tf.initialize_local_variables()
+            vars_to_init = {tf.is_variable_initialized(v): v for v in tf.global_variables()}
+            init_op = tf.global_variables_initializer()
+            local_init_op = tf.local_variables_initializer()
 
             if self.is_chief:
                 self._init_summaries()  # Sets self._summary_tensors
@@ -1115,7 +1116,7 @@ class NNModel(metaclass=abc.ABCMeta):
         self.info('Requesting data from {}. (current size {})'.format(queue_name, self.source_queue_size(queue_name)))
 
         self._consumer_threads[queue_name] = qr.start_threads(self.session, max_size, num_threads, net=self)
-        # TODO(daeyun): check dequeue from the local queues still work after global dequeue halts.
+        # TODO(daeyun): check dequeue from the local queues still works after global dequeue halts.
 
         return qr
 
@@ -1294,7 +1295,7 @@ class NNModel(metaclass=abc.ABCMeta):
                 name = '{}:0'.format(name)
             try:
                 # Assumes all variables belong to at least one collection.
-                variables = self.get_collections([tf.GraphKeys.VARIABLES,
+                variables = self.get_collections([tf.GraphKeys.GLOBAL_VARIABLES,
                                                   tf.GraphKeys.LOCAL_VARIABLES,
                                                   tf.GraphKeys.MODEL_VARIABLES,
                                                   tf.GraphKeys.TRAINABLE_VARIABLES,
@@ -1513,7 +1514,7 @@ class NNModel(metaclass=abc.ABCMeta):
             overall_mean, total_num_examples = self.aggregate_mean(np.mean(losses), num_examples_trained)
             if self.is_chief:
                 self.info('Overall training loss was {:.6g} over {} examples.'.format(overall_mean, total_num_examples))
-                self.write_scalar_summary(tag='loss/loss_all', value=overall_mean, summary_writer_name='train', flush=True)
+                self.write_scalar_summary(tag='loss_all', value=overall_mean, summary_writer_name='train', flush=True)
         else:
             self.aggregate_mean(None, None)
 
@@ -1534,8 +1535,9 @@ class NNModel(metaclass=abc.ABCMeta):
         :param summary_keys: A list of summary modes, 'SIMPLE', 'ALL', 'IMAGE', etc. Can be empty (default).
         :param check_placeholder_coverage: If `True`, raise an exception when `feed` contains an optional placeholder
         and there are any remaining optional placeholders that depend on the same queue.
+        :return [loss, global_step]
         """
-        assert self.job_name in ('worker', 'local')
+        assert self.job_name in ('worker', 'local', '')  # Empty if debug mode.
         # summary_writer_name should be 'train' by default.
         assert len(self.graph.get_collection('loss_to_minimize')) == 1  # Sanity check.
         loss = self.graph.get_collection('loss_to_minimize')[0]
@@ -1635,12 +1637,9 @@ class NNModel(metaclass=abc.ABCMeta):
             current_queue_size = self.current_queue_size()
             b = max(min(batch_size, current_queue_size), 1)
 
-            # TODO(daeyun)
-            b = 60
-
             try:
                 out = self.eval(tensor_names, feed_dict={'batch_size': b, }, is_training=False, summary_keys=keys, summary_writer_name=source)
-                print(num_batches, out, b)
+                print(source, num_batches, out, b, num_examples_trained)
             except (tf.errors.OutOfRangeError, tf.errors.NotFoundError, BlockingIOError) as ex:
                 is_out_of_range = True
             except Exception as ex:
@@ -1681,7 +1680,7 @@ class NNModel(metaclass=abc.ABCMeta):
 
         if self.is_chief:
             for k, v in ret.items():
-                self.write_scalar_summary(tag='loss/{}'.format(k), value=v, summary_writer_name=source, flush=True)
+                self.write_scalar_summary(tag='{}'.format(k), value=v, summary_writer_name=source, flush=True)
 
         self.barrier('write_scalar_summary/{}'.format(source))
 
@@ -1835,6 +1834,7 @@ class NNModel(metaclass=abc.ABCMeta):
             batch_size_value = new_feed_dict[batch_size_ph]
 
             i = 0
+            wait_start_time = time.time()
             while True:
                 local_queue_size = self.current_queue_size()
                 if local_queue_size < batch_size_value:
@@ -1855,7 +1855,16 @@ class NNModel(metaclass=abc.ABCMeta):
                                                'Did you forget to call `.request_data_from_queue()`?'))
                     self.info('Worker queue is empty. Waiting for data from global queue "{}" (size {}).'.format(
                         self._current_source_queue_name, self.source_queue_size(self._current_source_queue_name)))
+
+                elif time.time() - wait_start_time > 30:
+                    dead_threads = [~thread.is_alive() for thread in self._consumer_threads[self._current_source_queue_name]]
+                    self.info('Inactive threads: {}'.format(dead_threads))
+                    if all([~thread.is_alive() for thread in self._consumer_threads[self._current_source_queue_name]]):
+                        self.info('The queue runner probably terminated. Out of range error will be raised.')
+                        break
+
                 time.sleep(min(0.4 * (i + 1), 10))
+
                 i += 1
 
         self.run_metadata = None
@@ -1901,7 +1910,7 @@ class NNModel(metaclass=abc.ABCMeta):
         for name in names:
             assert name in self._summary_writers
             writer = self._summary_writers[name]
-            assert isinstance(writer, tf.train.SummaryWriter)
+            assert isinstance(writer, tf.summary.FileWriter)
             writer.flush()
 
     def write_scalar_summary(self, tag, value, summary_writer_name, flush=False):
@@ -1996,12 +2005,10 @@ class NNModel(metaclass=abc.ABCMeta):
                 self.saver.restore(self.session, restore_path)
                 self.info("Restored model from {}".format(restore_path))
 
-    def add_scalar_summary(self, tag: str, value: tf.Tensor, summary_keys=(), name: str = None) -> tf.Tensor:
+    def add_scalar_summary(self, name, value: tf.Tensor, summary_keys=()) -> tf.Tensor:
         """
         A wrapper around `tf.scalar_summary` that prints out logs and adds to the `all` collection.
         """
-        if name is None:
-            name = tag + '_summary'
         ensure_list_or_tuple(summary_keys, str)
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
@@ -2011,16 +2018,14 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['scalar']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        self.info('Adding scalar summary tag {} to collections {}.'.format(tag, ','.join(collection_keys)))
-        summary_op = tf.scalar_summary(tag, value, collections=collection_keys, name=name)
+        self.info('Adding scalar summary {} to collections {}.'.format(name, ','.join(collection_keys)))
+        summary_op = tf.summary.scalar(name=name, tensor=value, collections=collection_keys)
         return summary_op
 
-    def add_historgram_summary(self, tag: str, values: tf.Tensor, summary_keys=(), name: str = None) -> tf.Tensor:
+    def add_historgram_summary(self, name: str, values: tf.Tensor, summary_keys=()) -> tf.Tensor:
         """
         A wrapper around `tf.histogram_summary` that prints out logs and adds to the `all` collection.
         """
-        if name is None:
-            name = tag + '_summary'
         ensure_list_or_tuple(summary_keys, str)
         ensure_list_or_tuple(values, tf.Tensor)
         for summary_key in summary_keys:
@@ -2035,12 +2040,11 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['histogram']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        self.info('Adding histogram summary tag {} to collection {}'.format(tag, ','.join(collection_keys)))
-        summary_op = tf.histogram_summary(tag=tag, name=name, values=concat_value, collections=collection_keys)
+        self.info('Adding histogram summary {} to collection {}'.format(name, ','.join(collection_keys)))
+        summary_op = tf.summary.histogram(name=name, values=concat_value, collections=collection_keys)
         return summary_op
 
-    def add_image_summary(self, tag: str, value: tf.Tensor, max_images: int = 3, summary_keys=(),
-                          name: str = None) -> tf.Tensor:
+    def add_image_summary(self, name: str, value: tf.Tensor, max_images: int = 3, summary_keys=()) -> tf.Tensor:
         """
         A wrapper around `tf.image_summary` that prints out logs and adds to the image collection.
 
@@ -2051,8 +2055,6 @@ class NNModel(metaclass=abc.ABCMeta):
         :param collection_keys: Graph collection keys to which this operation is added. 'image_summaries' is included by default.
         :return: A scalar `Tensor` of type `string`. The serialized `Summary` protocol buffer.
         """
-        if name is None:
-            name = tag + '_summary'
         ensure_list_or_tuple(summary_keys, str)
         for summary_key in summary_keys:
             if summary_key not in self._summary_keys:
@@ -2066,9 +2068,9 @@ class NNModel(metaclass=abc.ABCMeta):
 
         with_default_summary_keys = list(summary_keys) + ['image']
         collection_keys = [self._summary_key_prefix + key for key in with_default_summary_keys]
-        self.info('Adding image summary tag {} of shape {} to collections {}. max_images: {}'.format(
-            tag, shape, ','.join(collection_keys), max_images))
-        summary_op = tf.image_summary(tag, tensor=value, max_images=max_images, collections=collection_keys, name=name)
+        self.info('Adding image summary {} of shape {} to collections {}. max_images: {}'.format(
+            name, shape, ','.join(collection_keys), max_images))
+        summary_op = tf.summary.image(name=name, tensor=value, max_outputs=max_images, collections=collection_keys)
         return summary_op
 
     @functools.lru_cache(maxsize=None)

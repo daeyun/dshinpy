@@ -39,7 +39,7 @@ def __extend_sys_path(prepend_paths=(), append_paths=()):
 
 __extend_sys_path(
     prepend_paths=[],
-    append_paths=['~/Dropbox/git/dshinpy/', '~/Dropbox/git/multiview_shape/'],
+    append_paths=['~/Dropbox/git/dshinpy/', '~/Dropbox/git/mvshape/', '~/Dropbox/git/multiview_shape/', '~/git/mvshape/python'],
 )
 
 import abc
@@ -70,6 +70,7 @@ from IPython import get_ipython
 
 ipython = get_ipython()
 
+ipython.magic('reload_ext autoreload')
 ipython.magic('autoreload 2')
 # ipython.magic('aimport dshin')
 # ipython.magic('aimport multiview_shape')
@@ -98,7 +99,6 @@ from IPython.core.magic import (register_line_magic, register_cell_magic,
                                 register_line_cell_magic, needs_local_scope)
 
 from dshin import log
-from dshin import nn
 from dshin import geom2d
 from dshin import geom3d
 from dshin import transforms
@@ -157,7 +157,7 @@ def import_optional(module_name, alias=None, is_verbose=False):
             log.info('Optional dependency {} could not be imported.'.format(module_name))
 
 
-import_optional('tflearn')
+# import_optional('tflearn')
 import_optional('tqdm')
 
 # Aliases

@@ -1,9 +1,18 @@
 import numpy as np
 import scipy.linalg as la
+import hashlib
 
 
 class Camera(object):
-    def __init__(self, R, t, s, is_world_to_cam=True):
+    def __init__(self, R, t, s, sRt_scale=None, is_world_to_cam=True):
+        """
+        :param R: (3,3) Rotation matrix. Must be orthogonal.
+        :param t: (3,) Translation vector.
+        :param s: Pre-transformation scale. Applied before rotating and translating.
+        :param sRt_scale: Post-transformation scale. Both R and t are scaled by this amount. Not the same as `s`.
+            Changes t and s.
+        :param is_world_to_cam:
+        """
         if not is_world_to_cam:
             raise NotImplementedError()
         self.is_world_to_cam = is_world_to_cam
@@ -11,12 +20,32 @@ class Camera(object):
         self.t = t[:, None] if len(t.shape) == 1 else t
         self.s = s
 
-        self.R_inv, self.t_inv, self.s_inv = self._inverse(R, t, s)
+        if sRt_scale is None:
+            self.sRt_scale = 1.0
+        else:
+            assert isinstance(sRt_scale, float)
+            self.sRt_scale = sRt_scale
+
+        # if self.sRt_scale is not None:
+        #     assert isinstance(self.sRt_scale, float)
+        #     self.t *= self.sRt_scale
+        #     self.s *= self.sRt_scale
+
+        self.R_inv, self.t_inv, self.s_inv = self._inverse(self.R, self.t, self.s)
 
         self.pos = self.t_inv.ravel()
 
         self.viewdir = self.cam_to_world(np.array([0, 0, -1]).reshape(-1, 3)).ravel() - self.pos
         self.viewdir /= la.norm(self.viewdir)
+
+        self.up_vector = self.cam_to_world(np.array([0, 1, 0]).reshape(-1, 3)).ravel() - self.pos
+        self.up_vector /= la.norm(self.up_vector)
+
+    def Rt(self):
+        return np.hstack((self.R, self.t))
+
+    def Rt_inv(self):
+        return np.hstack((self.R_inv, self.t_inv))
 
     def sRt(self):
         return np.hstack((self.s * self.R, self.t))
@@ -25,10 +54,27 @@ class Camera(object):
         return np.hstack((self.s_inv * self.R_inv, self.t_inv))
 
     def world_to_cam(self, xyzs):
-        return self.sRt().dot(self._hom(xyzs).T).T
+        return self.sRt().dot(self._hom(xyzs).T).T * self.sRt_scale
 
     def cam_to_world(self, xyzs):
-        return self.sRt_inv().dot(self._hom(xyzs).T).T
+        return self.sRt_inv().dot(self._hom(xyzs / self.sRt_scale).T).T
+
+    def sRt_hash(self):
+        """
+        :return: SHA1 hash of sRt matrix ignoring very small numerical differences.
+        """
+        sRt_flat = np.ascontiguousarray(self.sRt(), dtype=np.float64).ravel()
+        values = ['{:.4f}'.format(item) for item in sRt_flat]
+
+        # '-0.0000' and '0.0000' are replaced by '0'
+        values = ['0' if float(value) == 0.0 else value for value in values]
+        values_string = ','.join(values)
+
+        sha1 = hashlib.sha1()
+        sha1.update(values_string.encode('utf8'))
+        ret = sha1.hexdigest()
+
+        return ret
 
     @classmethod
     def _inverse(cls, R: np.ndarray, t: np.ndarray, s: float = 1):
@@ -59,12 +105,16 @@ class Camera(object):
 
 class OrthographicCamera(Camera):
     @classmethod
-    def from_Rt(cls, Rt: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1), wh=(64, 64), is_world_to_cam=True):
-        return OrthographicCamera(Rt[:, :3], Rt[:, 3], s=s, trbl=trbl, wh=wh, is_world_to_cam=is_world_to_cam)
+    def from_Rt(cls, Rt: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1), wh=(64, 64), sRt_scale=None, is_world_to_cam=True):
+        return OrthographicCamera(Rt[:, :3], Rt[:, 3], s=s, trbl=trbl, wh=wh, is_world_to_cam=is_world_to_cam, sRt_scale=sRt_scale)
+
+    @classmethod
+    def identity(cls, wh):
+        return cls.from_Rt(Rt=np.eye(3, 4, dtype=np.float64), s=1.0, wh=wh)
 
     def __init__(self, R: np.ndarray, t: np.ndarray, s: float = 1.0, trbl=(1, 1, -1, -1),
-                 wh=(64, 64), is_world_to_cam=True):
-        super().__init__(R, t, s, is_world_to_cam=is_world_to_cam)
+                 wh=(64, 64), sRt_scale=None, is_world_to_cam=True):
+        super().__init__(R, t, s, sRt_scale=sRt_scale, is_world_to_cam=is_world_to_cam)
         self.trbl = trbl
         self.wh = wh
 
@@ -101,12 +151,15 @@ class OrthographicCamera(Camera):
 
 
 class PerspectiveCamera(Camera):
-    def __init__(self, R: np.ndarray, t: np.ndarray, K: np.ndarray = None, s: float = 1.0, is_world_to_cam=True):
+    def __init__(self, R: np.ndarray, t: np.ndarray, K: np.ndarray = None, s: float = 1.0, sRt_scale=None, is_world_to_cam=True):
         assert R.shape == (3, 3)
         assert K.shape == (3, 3)
         if len(t.shape) == 1:
             t = t[None, :]
         assert t.shape == (3, 1)
+
+        if sRt_scale is not None:
+            raise NotImplementedError()
 
         self._check_orthogonal(R)
 

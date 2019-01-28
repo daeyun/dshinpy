@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import numpy
 import numpy as np
@@ -416,6 +417,7 @@ def normalize_mesh_vertices(mesh, up='+z'):
 
 
 def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
+    assert depth.ndim == 2
     d = depth.copy()
     if hasattr(depth, 'mask'):
         d[depth.mask] = np.nan
@@ -440,6 +442,46 @@ def cam_pts_from_ortho_depth(depth, trbl=(1, 1, -1, -1)):
     impts[:, 2] *= -1
 
     return impts
+
+
+def cam_pts_from_perspective_depth(depth, K, trbl=(1, 1, -1, -1)):
+    """
+    Point cloud from opengl depth image.
+    See http://www.songho.ca/opengl/gl_projectionmatrix.html
+
+    p = K*[x, y, z].T  where z=-d
+    x_n, y_n = p[:2]/z
+
+    :param depth:
+    :param K: (3, 3)
+    :param trbl:
+    :return:
+    """
+    assert K.shape == (3, 3)
+    d = depth.copy()
+    if hasattr(depth, 'mask'):
+        d[depth.mask] = np.nan
+    im_wh = d.shape[::-1]
+
+    finite = np.isfinite(d)
+    y, x = np.where(finite)
+    z = d[finite]
+    impts = np.stack([x, y, z], axis=1)
+
+    # important.
+    impts[:, :2] += 0.5
+
+    top, right, bottom, left = trbl
+    impts[:, 0] *= (right - left) / im_wh[0]
+    impts[:, 1] *= -(top - bottom) / im_wh[1]
+    impts[:, 0] += left
+    impts[:, 1] += top
+    impts[:, :2] *= impts[:, [2]]
+    impts[:, 2] *= -1
+    pts = la.inv(K).dot(impts.T).T[:, :2]
+    pts = np.concatenate([pts, -z[:, None]], axis=1)
+
+    return pts
 
 
 def quaternion_matrix(quaternion):
@@ -537,12 +579,14 @@ def spherical_coord_align_rotation(v1, v2):
     b = unit_vector(v2)
     a[2] = b[2] = 0
     azimuth = angle(a, b, deg=False, ref_plane=np.array([0, 0, 1]))
+
     assert -np.pi <= azimuth <= np.pi
     xyrot = zrotate(azimuth, deg=False)[:3, :3]
     vs = v1.dot(xyrot.T)
     elaxis = np.cross(vs, v2)
     elevation = angle(vs, v2, deg=False, ref_plane=elaxis)
-    assert -np.pi / 2 <= elevation <= np.pi / 2
+
+    assert -np.pi <= elevation <= np.pi
     elrot = rotation_matrix(elevation, elaxis, deg=False)[:3, :3]
     Q = elrot.dot(xyrot)
     assert np.allclose(la.det(Q), 1.0)
@@ -633,7 +677,7 @@ def depth_normals(depth, worldpts, viewdir, window_size=5, min_near_pts=4, visua
     return normals, imxyz
 
 
-def rescale_and_recenter(image, hw=(64, 64), padding=1):
+def rescale_and_recenter(image, hw=(64, 64), padding=1, return_scale_and_center=False):
     assert 2 == len(image.shape)
     # Crop margins with nan values.
     y, x = np.where(~np.isnan(image))
@@ -655,7 +699,14 @@ def rescale_and_recenter(image, hw=(64, 64), padding=1):
         ratios = np.array(roi.shape) / np.array(hw)
         longest_axis = np.argmax(ratios)
         im_scale = (hw[longest_axis] - padding * 2) / roi.shape[longest_axis] + 1e-8
-        resized = spndim.zoom(roi, zoom=im_scale, order=0, mode='constant', cval=np.nan)
+
+        # Ignore the "the output shape of zoom() is calculated with round() instead of int()" warning.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r'.*?output shape of zoom.*', category=UserWarning)
+            resized = spndim.zoom(roi, zoom=im_scale, order=0, mode='constant', cval=np.nan)
+
+        # Sanity check. Might not be correct.
+        assert max(resized.shape) == max(hw)
 
         # Depth values are rescaled so that this is a rigid 3D transformation.
         value_scale = im_scale * in_out_ratio
@@ -671,13 +722,69 @@ def rescale_and_recenter(image, hw=(64, 64), padding=1):
 
     assert np.allclose(output.shape, hw)
 
+    if return_scale_and_center:
+        assert isinstance(center, tuple) and im_scale > 0.0
+        out_center = tuple(np.array(center, dtype=np.float64) / in_out_ratio)
+        # Center is in output image coordinates. i.e. not affected by the size of the original image.
+        return output, (value_scale, out_center)
     return output
+
+
+def denormalize_depth_image(image, inv_scale, im_center_yx, depth_mean):
+    depth_denorm = image * inv_scale + depth_mean
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r'.*?output shape of zoom.*', category=UserWarning)
+        resized = spndim.zoom(depth_denorm, zoom=inv_scale, order=0, mode='constant', cval=np.nan)
+
+    ret = np.full(image.shape, np.nan, dtype=image.dtype)
+
+    center_y, center_x = im_center_yx
+    h, w = resized.shape
+    ystart, xstart = np.rint((center_y - h * 0.5, center_x - w * 0.5)).astype(int)
+    ret[ystart:ystart + h, xstart:xstart + w] = resized
+
+    return ret
+
+
+def depth_image_centroid_and_mean_dist(image, trbl=(1, 1, -1, -1)):
+    pts = cam_pts_from_ortho_depth(image, trbl=trbl)
+    centroid_xyz = pts.mean(axis=0)
+
+    # # `im_scale` is the same as the image zoom factor in rescale_and_recenter. `padding` values should match.
+    # # Should be computed exactly the same way.
+    # im_hw = image.shape[::-1]
+    # y, x = np.where(~np.isnan(image))
+    # h, w = y.max() - y.min() + 1, x.max() - x.min() + 1
+    # center = int(y.min() + h / 2), int(x.min() + w / 2)
+    # ystart = int(center[0] - h / 2)
+    # yend = int(center[0] + h / 2)
+    # xstart = int(center[1] - w / 2)
+    # xend = int(center[1] + w / 2)
+    # roi = image[ystart:yend, xstart:xend]
+    # assert roi.shape == (h, w)
+    # ratios = np.array((h, w)) / np.array(im_hw)
+    # longest_axis = np.argmax(ratios)
+    # im_scale = (im_hw[longest_axis] - padding * 2) / roi.shape[longest_axis] + 1e-8
+    # inv_im_scale = 1.0 / im_scale
+
+    mean_dist = la.norm(pts - centroid_xyz, axis=1, ord=2).mean()
+    return tuple(centroid_xyz), mean_dist
+
+
+def cam_pts_from_normalized_ortho_depth(image, target_centroid_xyz, target_mean_dist, trbl=(1, 1, -1, -1)):
+    pts = cam_pts_from_ortho_depth(image, trbl=trbl)
+    input_centroid_xyz = pts.mean(axis=0)
+    input_mean_dist = la.norm(pts - input_centroid_xyz, axis=1, ord=2).mean()
+    target_scale = target_mean_dist / input_mean_dist
+    pts = (pts - input_centroid_xyz) * target_scale + target_centroid_xyz
+    return pts
 
 
 def normalize_depth_image(image, hw=(64, 64)):
     # Depth image is resized, recentered, and rescaled so
     # that the resulting transformation is rigid in 3D.
-    resized_image = rescale_and_recenter(image, hw=hw, padding=0)
+    padding = 0
+    resized_image = rescale_and_recenter(image, hw=hw, padding=padding)
 
     valid = ~np.isnan(resized_image)
     if valid.sum() <= 0:
@@ -685,7 +792,9 @@ def normalize_depth_image(image, hw=(64, 64)):
         return resized_image
 
     # Returns a mean-centered image.
-    resized_image -= resized_image[valid].mean()
+    depth_mean = resized_image[valid].mean()
+    resized_image -= depth_mean
+
     return resized_image
 
 
@@ -700,6 +809,7 @@ def apply34_mesh(T, mesh):
 
 
 def find_similarity_transform(source_points, target_points):
+    assert source_points.shape == target_points.shape
     source_centroid = source_points.mean(0)
     target_centroid = target_points.mean(0)
 
